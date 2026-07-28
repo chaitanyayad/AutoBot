@@ -19,7 +19,7 @@ Phases 2–3; the seams for them are already in place.
 - **DAG resolver** — `get_runnable_tasks()` plus Kahn topological sort
   ([app/dag.py](app/dag.py))
 - **API** — register, trigger, inspect ([app/main.py](app/main.py))
-- **28 passing tests**, including the fan-out/fan-in resolution order
+- **35 passing tests**, including the fan-out/fan-in resolution order
 
 ---
 
@@ -99,8 +99,12 @@ pending ──► queued ──► running ──► success
                           └──────► failed   (retry: -> queued, Phase 3)
 ```
 
-A run is `completed` when every task succeeded, and `failed` as soon as one task
-exhausts its retries — downstream tasks then stay `pending` rather than executing.
+A run is `completed` when every task succeeded, and `failed` once a task has failed
+**and** no work is still in flight — tasks already dispatched are allowed to report
+back first. Tasks downstream of a failure stay `pending` rather than executing.
+
+> Tested on SQLite (the suite) and statically verified to emit `JSONB`/`TEXT[]` on
+> the Postgres dialect. An end-to-end run against a live Postgres is still outstanding.
 
 ---
 
@@ -116,7 +120,7 @@ app/
   main.py        FastAPI endpoints
   schemas.py     request/response models
 scripts/manual_test.py   Phase 1 acceptance walkthrough
-tests/                   28 tests (unit + API)
+tests/                   35 tests (unit + API)
 schema.sql               canonical Postgres DDL
 docker-compose.yml       postgres + rabbitmq
 ```

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from app.models import (
     TASK_FAILED,
     TASK_PENDING,
+    TASK_QUEUED,
+    TASK_RUNNING,
     TASK_SUCCESS,
     Task,
 )
@@ -171,10 +173,19 @@ def get_runnable_tasks(tasks: list[Task]) -> list[Task]:
 
 
 def is_run_finished(tasks: list[Task]) -> bool:
-    """A run is finished when no task can still make progress."""
-    if any(t.status == TASK_FAILED for t in tasks):
+    """A run is finished when no task can still make progress.
+
+    A failure alone is not enough: tasks already handed to a worker must be
+    allowed to report back first, otherwise their results land on a run that has
+    already been closed out.
+    """
+    if any(t.status in (TASK_QUEUED, TASK_RUNNING) for t in tasks):
+        return False  # work is still in flight
+    if all(t.status == TASK_SUCCESS for t in tasks):
         return True
-    return all(t.status == TASK_SUCCESS for t in tasks)
+    # Nothing in flight — finished iff nothing further can be dispatched, i.e.
+    # whatever is still pending is permanently blocked by an upstream failure.
+    return not get_runnable_tasks(tasks)
 
 
 def is_run_failed(tasks: list[Task]) -> bool:

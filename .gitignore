@@ -5,3 +5,6 @@ venv/
 .env
 .pytest_cache/
 *.sqlite3
+
+# local phase notes, not published
+summary/

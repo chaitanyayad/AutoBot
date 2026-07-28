@@ -147,6 +147,118 @@ def test_run_detail_exposes_runnable_now(client):
     assert client.get(f"/runs/{run_id}").json()["runnable_now"] == []
 
 
+def test_undispatched_task_cannot_report_a_result(client):
+    """A pending task must not be completable — that would break DAG order."""
+    workflow_id = register(client, THREE_TASK_LINEAR)
+    run_id = client.post(f"/workflows/{workflow_id}/trigger").json()["id"]
+
+    response = client.post(f"/runs/{run_id}/tasks/c/simulate")
+    assert response.status_code == 409
+    assert "not dispatched" in response.json()["detail"]
+
+    statuses = {t["task_name"]: t["status"] for t in client.get(f"/runs/{run_id}/tasks").json()}
+    assert statuses == {"a": "queued", "b": "pending", "c": "pending"}
+
+
+def test_task_cannot_report_twice(client):
+    workflow_id = register(client, THREE_TASK_LINEAR)
+    run_id = client.post(f"/workflows/{workflow_id}/trigger").json()["id"]
+
+    complete(client, run_id, "a")
+    assert client.post(f"/runs/{run_id}/tasks/a/simulate").status_code == 409
+
+
+def test_failure_waits_for_in_flight_siblings(client):
+    """A failure must not close the run while a sibling is still executing."""
+    fan_out = {
+        "name": "fan_out",
+        "workflow": [
+            {"id": "root", "depends_on": []},
+            {"id": "x", "depends_on": ["root"]},
+            {"id": "y", "depends_on": ["root"]},
+            {"id": "end", "depends_on": ["x", "y"]},
+        ],
+    }
+    workflow_id = register(client, fan_out)
+    run_id = client.post(f"/workflows/{workflow_id}/trigger").json()["id"]
+    complete(client, run_id, "root")
+
+    # x fails while y is still queued -> run stays running so y can report back.
+    run = complete(client, run_id, "x", succeed=False)
+    assert run["status"] == "running"
+
+    run = complete(client, run_id, "y")
+    assert run["status"] == "failed"
+    statuses = {t["task_name"]: t["status"] for t in run["tasks"]}
+    assert statuses == {"root": "success", "x": "failed", "y": "success", "end": "pending"}
+
+
+def test_models_and_schema_sql_agree_on_constraints(client, engine):
+    """create_all() must not produce a weaker schema than schema.sql."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    task_indexes = {i["name"] for i in inspector.get_indexes("tasks")}
+    assert {"idx_tasks_run_id", "idx_tasks_status"} <= task_indexes
+
+    unique = {c["name"] for c in inspector.get_unique_constraints("tasks")}
+    assert "uq_tasks_run_task_name" in unique
+
+    check_names = {c["name"] for c in inspector.get_check_constraints("tasks")}
+    assert "ck_tasks_status" in check_names
+
+
+def test_model_ddl_carries_the_same_defaults_as_schema_sql():
+    """create_all() must emit the DEFAULT clauses schema.sql declares.
+
+    Without these, any insert that does not go through SQLAlchemy (psql, a
+    backfill, a non-Python worker) hits NOT NULL with no default.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    from app.db import Base
+
+    ddl = {
+        t.name: str(CreateTable(t).compile(dialect=postgresql.dialect()))
+        for t in Base.metadata.sorted_tables
+    }
+
+    assert "status TEXT DEFAULT 'pending' NOT NULL" in ddl["workflow_runs"]
+    assert "status TEXT DEFAULT 'pending' NOT NULL" in ddl["tasks"]
+    assert "retry_count INTEGER DEFAULT 0 NOT NULL" in ddl["tasks"]
+    assert "max_retries INTEGER DEFAULT 3 NOT NULL" in ddl["tasks"]
+    assert "status TEXT DEFAULT 'idle' NOT NULL" in ddl["workers"]
+
+    # Known, deliberate divergence: schema.sql gives depends_on DEFAULT '{}',
+    # which is Postgres array syntax and invalid for the SQLite JSON variant.
+    # The engine always supplies depends_on explicitly, so nothing relies on it.
+    assert "depends_on TEXT[] NOT NULL" in ddl["tasks"]
+
+
+def test_invalid_status_rejected_by_database(client, session_factory):
+    """The status CHECK constraint is enforced, not just asserted in Python."""
+    import uuid as uuid_mod
+
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Task, Workflow, WorkflowRun
+
+    session = session_factory()
+    workflow = Workflow(name="w", definition={"workflow": [{"id": "a"}]})
+    session.add(workflow)
+    session.flush()
+    run = WorkflowRun(workflow_id=workflow.id, status="running")
+    session.add(run)
+    session.flush()
+
+    session.add(Task(run_id=run.id, task_name="a", depends_on=[], status="banana"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.close()
+
+
 def test_run_404(client):
     response = client.get("/runs/00000000-0000-0000-0000-000000000000")
     assert response.status_code == 404

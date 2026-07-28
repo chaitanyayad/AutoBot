@@ -1,4 +1,11 @@
--- Canonical Postgres schema. app/models.py mirrors this.
+-- Canonical Postgres schema. app/models.py mirrors this, and
+-- tests/test_api.py::test_model_ddl_carries_the_same_defaults_as_schema_sql
+-- pins the two together so they cannot drift apart silently.
+--
+-- Known divergence: depends_on's DEFAULT '{}' below is Postgres array syntax and
+-- has no SQLite equivalent, so the models omit it. Nothing relies on it — the
+-- engine always writes depends_on explicitly.
+--
 -- Applied automatically by docker-compose (mounted into postgres initdb).
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

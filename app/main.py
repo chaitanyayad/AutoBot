@@ -18,6 +18,8 @@ from app.dag import DagValidationError, get_runnable_tasks
 from app.db import get_session, init_db
 from app.models import (
     TASK_FAILED,
+    TASK_QUEUED,
+    TASK_RUNNING,
     TASK_SUCCESS,
     TERMINAL_RUN_STATUSES,
     Task,
@@ -159,6 +161,16 @@ def simulate_task_result(
     if task is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"task {task_name!r} not found in run {run_id}"
+        )
+
+    # Only a dispatched task may report a result. Without this the endpoint can
+    # drive a run into a state the DAG says is impossible (completing a task
+    # before its dependencies have run).
+    if task.status not in (TASK_QUEUED, TASK_RUNNING):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"task {task_name!r} is {task.status}, not dispatched — "
+            "only queued or running tasks can report a result",
         )
 
     task.status = TASK_SUCCESS if succeed else TASK_FAILED

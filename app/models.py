@@ -10,12 +10,16 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,6 +41,14 @@ TASK_SUCCESS = "success"
 TASK_FAILED = "failed"
 
 TERMINAL_RUN_STATUSES = {RUN_COMPLETED, RUN_FAILED, RUN_CANCELLED}
+
+RUN_STATUSES = (RUN_PENDING, RUN_RUNNING, RUN_COMPLETED, RUN_FAILED, RUN_CANCELLED)
+TASK_STATUSES = (TASK_PENDING, TASK_QUEUED, TASK_RUNNING, TASK_SUCCESS, TASK_FAILED)
+
+
+def _in_clause(column: str, values: tuple[str, ...]) -> str:
+    allowed = ",".join(f"'{v}'" for v in values)
+    return f"{column} IN ({allowed})"
 
 JSONType = JSON().with_variant(JSONB, "postgresql")
 StringArray = JSON().with_variant(ARRAY(Text), "postgresql")
@@ -67,12 +79,18 @@ class WorkflowRun(Base):
     """A specific execution of a workflow definition."""
 
     __tablename__ = "workflow_runs"
+    __table_args__ = (
+        CheckConstraint(_in_clause("status", RUN_STATUSES), name="ck_runs_status"),
+        Index("idx_runs_status", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     workflow_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("workflows.id"), nullable=False
+        Uuid, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
     )
-    status: Mapped[str] = mapped_column(Text, nullable=False, default=RUN_PENDING)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default=RUN_PENDING, server_default=RUN_PENDING
+    )
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )
@@ -90,18 +108,30 @@ class Task(Base):
     """A task instance belonging to one run."""
 
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(_in_clause("status", TASK_STATUSES), name="ck_tasks_status"),
+        UniqueConstraint("run_id", "task_name", name="uq_tasks_run_task_name"),
+        Index("idx_tasks_run_id", "run_id"),
+        Index("idx_tasks_status", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("workflow_runs.id"), nullable=False, index=True
+        Uuid, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
     )
     task_name: Mapped[str] = mapped_column(Text, nullable=False)
     depends_on: Mapped[list[str]] = mapped_column(
         StringArray, nullable=False, default=list
     )
-    status: Mapped[str] = mapped_column(Text, nullable=False, default=TASK_PENDING)
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default=TASK_PENDING, server_default=TASK_PENDING
+    )
+    retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    max_retries: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3, server_default=text("3")
+    )
     worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -118,9 +148,14 @@ class Worker(Base):
     """Heartbeat registry. Populated from Phase 2 onward."""
 
     __tablename__ = "workers"
+    __table_args__ = (
+        CheckConstraint("status IN ('idle','busy')", name="ck_workers_status"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     last_heartbeat: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="idle")
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="idle", server_default="idle"
+    )

@@ -177,6 +177,19 @@ def test_run_finished_and_failed_on_any_failure():
     assert is_run_failed(tasks)
 
 
+def test_run_not_finished_while_a_task_is_in_flight():
+    """A failure does not close the run while a sibling is still executing."""
+    tasks = [
+        make_task("x", status=TASK_FAILED),
+        make_task("y", status=TASK_QUEUED),
+    ]
+    assert not is_run_finished(tasks)
+
+    tasks[1].status = TASK_SUCCESS
+    assert is_run_finished(tasks)
+    assert is_run_failed(tasks)
+
+
 def test_run_not_finished_while_work_remains():
     tasks = [make_task("a", status=TASK_SUCCESS), make_task("b", ["a"])]
     assert not is_run_finished(tasks)
