@@ -1,4 +1,4 @@
-# Workflow Orchestration Engine
+# AutoBot (Workflow Orchestration Engine)
 
 A mini Apache Airflow: define a workflow as a DAG once, and the engine works out what
 runs first, what runs in parallel, and when the run is complete.
