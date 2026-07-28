@@ -1,0 +1,10 @@
+{
+  "name": "resume_pipeline",
+  "workflow": [
+    { "id": "parse_resume",        "depends_on": [] },
+    { "id": "extract_skills",      "depends_on": ["parse_resume"] },
+    { "id": "generate_embeddings", "depends_on": ["parse_resume"] },
+    { "id": "save_results",        "depends_on": ["extract_skills", "generate_embeddings"] },
+    { "id": "send_notification",   "depends_on": ["save_results"] }
+  ]
+}
