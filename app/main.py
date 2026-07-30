@@ -7,20 +7,17 @@ resolution order can be stepped through by hand.
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import scheduler
+from app import config, scheduler
 from app.dag import DagValidationError, get_runnable_tasks
 from app.db import get_session, init_db
 from app.models import (
-    TASK_FAILED,
     TASK_QUEUED,
     TASK_RUNNING,
-    TASK_SUCCESS,
     TERMINAL_RUN_STATUSES,
     Task,
     Workflow,
@@ -146,11 +143,20 @@ def simulate_task_result(
     succeed: bool = True,
     session: Session = Depends(get_session),
 ):
-    """Stand-in for a worker until Phase 2.
+    """Development-only stand-in for a worker.
 
-    Marks a task success/failed, then runs the scheduler so the next wave of
-    runnable tasks appears — this is how the resolution order is verified by hand.
+    Real workers exist as of Phase 2, so this is disabled unless
+    ENABLE_SIMULATE_ENDPOINT is set — it mutates run state without authentication.
+    It drives the same `scheduler.report_result` path a worker does, so it cannot
+    diverge from real execution.
     """
+    if not config.ENABLE_SIMULATE_ENDPOINT:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "simulate endpoint is disabled; run a worker (python -m app.worker) "
+            "or set ENABLE_SIMULATE_ENDPOINT=true",
+        )
+
     run = _get_run_or_404(session, run_id)
     if run.status in TERMINAL_RUN_STATUSES:
         raise HTTPException(status.HTTP_409_CONFLICT, f"run is already {run.status}")
@@ -173,12 +179,8 @@ def simulate_task_result(
             "only queued or running tasks can report a result",
         )
 
-    task.status = TASK_SUCCESS if succeed else TASK_FAILED
-    task.completed_at = datetime.now(timezone.utc)
-    if not succeed:
-        task.error_message = "simulated failure"
-    session.flush()
-
-    scheduler.resolve(session, run_id)
+    scheduler.report_result(
+        session, task, succeed=succeed, error=None if succeed else "simulated failure"
+    )
     session.commit()
     return _run_detail(session, run)

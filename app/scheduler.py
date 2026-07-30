@@ -4,6 +4,7 @@ Phase 1 stops at "which tasks are runnable". Phase 2 replaces `dispatch` with a
 real RabbitMQ publish; nothing else in here needs to change.
 """
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -11,16 +12,22 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import config
+from app.broker import TaskMessage, get_broker
 from app.dag import get_runnable_tasks, is_run_failed, is_run_finished, validate_definition
 from app.models import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_RUNNING,
+    TASK_FAILED,
     TASK_QUEUED,
+    TASK_RUNNING,
+    TASK_SUCCESS,
     Task,
     Workflow,
     WorkflowRun,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -76,13 +83,57 @@ def resolve(session: Session, run_id: uuid.UUID) -> list[Task]:
 
 
 def dispatch(session: Session, tasks: list[Task]) -> None:
-    """Hand tasks to the executor.
+    """Mark tasks `queued` and publish them to the broker.
 
-    Phase 1: mark them `queued` so the state machine advances and the same task is
-    not resolved twice. Phase 2: publish to RabbitMQ inside this function.
+    The status change is flushed *before* publishing, so a worker that picks the
+    message up immediately never sees the task as still `pending`. If publishing
+    then fails the task is left `queued` with nothing to run it — Phase 3's
+    heartbeat/timeout recovery is what reclaims that case.
     """
+    broker = get_broker()
     for task in tasks:
         task.status = TASK_QUEUED
+    session.flush()
+
+    for task in tasks:
+        broker.publish(
+            TaskMessage(
+                task_id=str(task.id),
+                run_id=str(task.run_id),
+                task_name=task.task_name,
+                attempt=task.retry_count,
+            )
+        )
+    logger.debug("dispatched %s", [t.task_name for t in tasks])
+
+
+def report_result(
+    session: Session,
+    task: Task,
+    *,
+    succeed: bool,
+    error: str | None = None,
+) -> WorkflowRun:
+    """Record a task outcome and release whatever it unblocked.
+
+    The single place a task leaves the running state — used by the worker and by
+    the development `/simulate` endpoint, so both drive the state machine
+    identically.
+    """
+    task.status = TASK_SUCCESS if succeed else TASK_FAILED
+    task.completed_at = _utcnow()
+    task.error_message = error if not succeed else None
+    session.flush()
+
+    resolve(session, task.run_id)
+    return session.get(WorkflowRun, task.run_id)
+
+
+def claim(session: Session, task: Task, worker_id: str) -> None:
+    """Move a dispatched task into `running` on behalf of a worker."""
+    task.status = TASK_RUNNING
+    task.worker_id = worker_id
+    task.started_at = _utcnow()
     session.flush()
 
 

@@ -1,31 +1,118 @@
-"""Test fixtures: a throwaway SQLite database per test, and a TestClient bound to it."""
+"""Test fixtures: a throwaway database per test, and a TestClient bound to it.
+
+Runs against **Postgres by default** — the database this engine actually targets,
+so JSONB, TEXT[] and the CHECK constraints are exercised for real:
+
+    docker compose up -d postgres
+    python -m pytest -q
+
+SQLite remains available for a quick serviceless run, at the cost of fidelity:
+
+    TEST_DATABASE_URL=sqlite+pysqlite:///:memory: python -m pytest -q
+"""
 
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+from dotenv import load_dotenv
+
+load_dotenv()
+
+SQLITE_URL = "sqlite+pysqlite:///:memory:"
+POSTGRES_URL = "postgresql+psycopg://orchestrator:orchestrator@localhost:5432/orchestrator"
+
+# TEST_DATABASE_URL wins, then whatever the app is configured with, then the default.
+TEST_DATABASE_URL = (
+    os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or POSTGRES_URL
+)
+IS_SQLITE = TEST_DATABASE_URL.startswith("sqlite")
+
+os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
+
+# Default to the in-process broker so the full publish/consume path runs without
+# RabbitMQ. tests/test_worker.py opts into a real broker when one is reachable.
+TEST_BROKER_URL = os.getenv("TEST_BROKER_URL", "memory://")
+os.environ["BROKER_URL"] = TEST_BROKER_URL
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app import broker as broker_module  # noqa: E402
+from app import config  # noqa: E402
 from app import db as db_module  # noqa: E402
+from app import executors  # noqa: E402
+from app.broker import InMemoryBroker  # noqa: E402
 from app.db import Base, get_session  # noqa: E402
 from app.main import app  # noqa: E402
 from app import models  # noqa: E402,F401  (registers mappers)
 
 
+TABLES = ("tasks", "workflow_runs", "workflows", "workers")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_broker():
+    """A fresh in-process broker per test, and no sleeping in the default handler."""
+    broker = InMemoryBroker()
+    broker_module.set_broker(broker)
+    executors.set_default_duration(0.0)
+    yield broker
+    broker_module.set_broker(None)
+    executors.clear_registry()
+
+
 @pytest.fixture()
-def engine():
-    eng = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,  # one shared connection => one shared in-memory db
-    )
+def broker(_isolated_broker):
+    return _isolated_broker
+
+
+@pytest.fixture(autouse=True)
+def _enable_simulate_endpoint(monkeypatch):
+    """The dev endpoint is off by default; the Phase 1 API tests drive it directly."""
+    monkeypatch.setattr(config, "ENABLE_SIMULATE_ENDPOINT", True)
+
+
+@pytest.fixture(scope="session")
+def _postgres_engine():
+    """One engine and one schema for the whole session; tables are emptied per test."""
+    eng = create_engine(TEST_DATABASE_URL, future=True)
+    try:
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except OperationalError as exc:
+        pytest.exit(
+            f"cannot reach Postgres at {TEST_DATABASE_URL}\n"
+            "start it with:  docker compose up -d postgres\n"
+            "or run serviceless with:  "
+            "TEST_DATABASE_URL=sqlite+pysqlite:///:memory: python -m pytest\n"
+            f"({exc.orig})",
+            returncode=1,
+        )
     Base.metadata.create_all(eng)
     yield eng
     eng.dispose()
+
+
+@pytest.fixture()
+def engine(request):
+    if IS_SQLITE:
+        eng = create_engine(
+            SQLITE_URL,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,  # one shared connection => one shared in-memory db
+        )
+        Base.metadata.create_all(eng)
+        yield eng
+        eng.dispose()
+        return
+
+    eng = request.getfixturevalue("_postgres_engine")
+    with eng.begin() as conn:
+        conn.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
+    yield eng
 
 
 @pytest.fixture()

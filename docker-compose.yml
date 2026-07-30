@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: orchestrator
       POSTGRES_DB: orchestrator
     ports:
-      - "5432:5432"
+      # Overridable: a native Postgres install often already owns 5432.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro

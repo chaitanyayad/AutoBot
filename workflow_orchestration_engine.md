@@ -235,11 +235,11 @@ while True:
 - [x] DAG resolver: `get_runnable_tasks()` function — `app/dag.py` (+ cycle detection, topological sort)
 - [x] Manual test: create a 3-task workflow, verify resolution order — `scripts/manual_test.py`, 28 tests passing
 
-### Phase 2 — Worker System
-- [ ] Single worker that consumes from RabbitMQ and executes tasks
-- [ ] Worker updates task status in DB
-- [ ] After task completes → call scheduler → publish next runnable tasks
-- [ ] Test full linear workflow end-to-end
+### Phase 2 — Worker System ✅
+- [x] Single worker that consumes from RabbitMQ and executes tasks — `app/worker.py`, `app/broker.py`
+- [x] Worker updates task status in DB — `claim()` → `running`, `report_result()` → `success`/`failed`
+- [x] After task completes → call scheduler → publish next runnable tasks — `scheduler.dispatch()` publishes
+- [x] Test full linear workflow end-to-end — 13 worker tests incl. a real-RabbitMQ round trip; 5-task pipeline verified live over Postgres + RabbitMQ
 
 ### Phase 3 — Retry + Fault Tolerance
 - [ ] Retry counter per task

@@ -22,10 +22,11 @@ CREATE TABLE IF NOT EXISTS workflows (
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','running','completed','failed','cancelled')),
+    status TEXT NOT NULL DEFAULT 'pending',
     triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT ck_runs_status
+        CHECK (status IN ('pending','running','completed','failed','cancelled'))
 );
 
 -- Individual task instances within a run
@@ -34,15 +35,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     run_id UUID NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
     task_name TEXT NOT NULL,
     depends_on TEXT[] NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending','queued','running','success','failed')),
+    status TEXT NOT NULL DEFAULT 'pending',
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     worker_id TEXT,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     error_message TEXT,
-    UNIQUE (run_id, task_name)
+    CONSTRAINT ck_tasks_status
+        CHECK (status IN ('pending','queued','running','success','failed')),
+    CONSTRAINT uq_tasks_run_task_name UNIQUE (run_id, task_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
@@ -53,5 +55,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_status ON workflow_runs(status);
 CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,
     last_heartbeat TIMESTAMPTZ,
-    status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle','busy'))
+    status TEXT NOT NULL DEFAULT 'idle',
+    CONSTRAINT ck_workers_status CHECK (status IN ('idle','busy'))
 );
