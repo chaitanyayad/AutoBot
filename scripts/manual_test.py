@@ -92,10 +92,9 @@ def main() -> int:
 
     wave = 1
     while broker.pending():
-        batch = [m.task_name for m in list(broker._queue)]
+        batch = [m.task_name for m in broker.messages()]
         print(f"\nwave {wave}: worker executing {batch}")
-        for _ in range(len(batch)):
-            worker.handle(broker._queue.popleft())
+        broker.consume(worker.handle, wait=True)
         run = client.get(f"/runs/{run_id}").json()
         show(f"after wave {wave}:", run["tasks"])
         wave += 1

@@ -5,8 +5,10 @@ runs first, what runs in parallel, and when the run is complete.
 
 Full project plan and roadmap: [workflow_orchestration_engine.md](workflow_orchestration_engine.md)
 
-**Status: Phases 1–2 complete.** The DAG engine resolves dependencies and real
-workers execute tasks over RabbitMQ. Retries and fault tolerance are Phase 3.
+**Status: Phases 1–3 complete.** The DAG engine resolves dependencies, real workers
+execute tasks over RabbitMQ, and failures retry with exponential backoff before
+landing in a dead letter queue. Tasks orphaned by a dead worker are reclaimed.
+Parallel execution across multiple workers is Phase 4.
 
 ---
 
@@ -22,8 +24,12 @@ workers execute tasks over RabbitMQ. Retries and fault tolerance are Phase 3.
 - **Workers** — consume from RabbitMQ, execute, report back, release the next wave
   ([app/worker.py](app/worker.py), [app/broker.py](app/broker.py))
 - **Task handlers** — register a callable per task name ([app/executors.py](app/executors.py))
-- **48 passing tests**, including a real-RabbitMQ round trip and the fan-out/fan-in
-  execution order
+- **Retries** — exponential backoff with jitter, then a dead letter queue
+  ([app/retry.py](app/retry.py))
+- **Fault tolerance** — worker heartbeats and recovery of tasks orphaned by a dead
+  worker ([app/recovery.py](app/recovery.py))
+- **74 passing tests**, including real-RabbitMQ round trips, the delayed-retry
+  round trip, and the fan-out/fan-in execution order
 
 ---
 
@@ -133,6 +139,24 @@ A run is `completed` when every task succeeded, and `failed` once a task has fai
 **and** no work is still in flight — tasks already dispatched are allowed to report
 back first. Tasks downstream of a failure stay `pending` rather than executing.
 
+### Retries and fault tolerance
+
+A failing task is re-queued with exponential backoff (`1s → 2s → 4s …`, plus jitter)
+until `max_retries` is spent; only then is it `failed`, and a copy is parked on
+`task_queue.dead` for inspection. Set `max_retries: 0` on a node to opt out.
+
+Delays use no plugins: a retry is published to a per-tier holding queue whose
+`x-message-ttl` expires it back onto the main queue. One queue per power-of-two
+delay, so messages inside a tier expire in arrival order rather than head-of-line
+blocking each other.
+
+Workers heartbeat into the `workers` table. A worker that dies mid-task would
+otherwise strand the row in `running` forever — the message was already acked, so
+RabbitMQ will not redeliver it. Every worker periodically sweeps for tasks whose
+worker has gone silent past `HEARTBEAT_TIMEOUT` and pushes them back through the
+same retry path, so a task that repeatedly kills its worker still exhausts its
+budget instead of looping.
+
 > Verified on both backends: 35/35 against a live Postgres 16 (the default) and
 > 35/35 on SQLite.
 
@@ -147,28 +171,27 @@ app/
   models.py      workflows / workflow_runs / tasks / workers
   dag.py         validation, topological sort, get_runnable_tasks()
   scheduler.py   run lifecycle: create_run, resolve, dispatch, report_result
-  broker.py      RabbitMQ queue + an in-process broker for tests
+  broker.py      RabbitMQ queue (+ delayed retry, DLQ) and an in-process broker
   executors.py   task handler registry
+  retry.py       exponential backoff with jitter
+  recovery.py    worker heartbeats + reclaiming orphaned tasks
   worker.py      consume -> claim -> execute -> report -> resolve
   main.py        FastAPI endpoints
   schemas.py     request/response models
+examples/handlers.py     sample handlers (flaky, doomed, slow)
 scripts/manual_test.py   DAG resolution walkthrough (no services needed)
-tests/                   48 tests (unit + API + worker)
+tests/                   74 tests (unit + API + worker + retry/recovery)
 schema.sql               canonical Postgres DDL
 docker-compose.yml       postgres + rabbitmq
 ```
 
 ---
 
-## Next: Phase 3 — retry + fault tolerance
+## Next: Phase 4 — parallel execution
 
-1. Re-queue failed tasks while `retry_count < max_retries` (the columns already exist)
-2. Exponential backoff on re-queue
-3. Dead letter queue for tasks that exhaust their retries
-4. Worker heartbeats in the `workers` table, and timeout recovery for tasks whose
-   worker died mid-execution
-
-**Known gap, deferred to Phase 4:** task claiming is not yet atomic. A duplicate
-delivery is handled (the worker re-reads status from the database and skips anything
-not `queued`), but two workers claiming simultaneously could still both execute —
-that needs `SELECT … FOR UPDATE SKIP LOCKED`.
+1. Run 3+ workers simultaneously via Docker Compose
+2. Test a fan-out DAG across real concurrent workers
+3. **Atomic task claim** — the known gap. A duplicate *delivery* is handled (the
+   worker re-reads status and skips anything not `queued`), but two workers
+   claiming the same task simultaneously could still both execute it. Needs
+   `SELECT … FOR UPDATE SKIP LOCKED` in `Worker.handle`.

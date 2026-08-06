@@ -241,11 +241,13 @@ while True:
 - [x] After task completes → call scheduler → publish next runnable tasks — `scheduler.dispatch()` publishes
 - [x] Test full linear workflow end-to-end — 13 worker tests incl. a real-RabbitMQ round trip; 5-task pipeline verified live over Postgres + RabbitMQ
 
-### Phase 3 — Retry + Fault Tolerance
-- [ ] Retry counter per task
-- [ ] Exponential backoff on re-queue
-- [ ] Dead letter queue for exhausted tasks
-- [ ] Worker heartbeat table + timeout recovery
+### Phase 3 — Retry + Fault Tolerance ✅
+- [x] Retry counter per task — `scheduler.report_result()` re-queues while `retry_count < max_retries`
+- [x] Exponential backoff on re-queue — `app/retry.py`; RabbitMQ TTL+DLX tier queues, no plugins
+- [x] Dead letter queue for exhausted tasks — `broker.dead_letter()` → `task_queue.dead`
+- [x] Worker heartbeat table + timeout recovery — `app/recovery.py`, swept by each worker
+- Verified live: retry backoff 1.09s → 1.99s then success; exhausted task parked in the DLQ;
+  worker killed mid-task and its orphan reclaimed by another worker
 
 ### Phase 4 — Parallel Execution
 - [ ] Run 3+ workers simultaneously via Docker Compose

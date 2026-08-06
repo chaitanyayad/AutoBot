@@ -56,6 +56,19 @@ def get_handler(task_name: str) -> Handler:
     return _REGISTRY.get(task_name, default_handler)
 
 
+def load_handler_modules(modules: list[str]) -> None:
+    """Import modules so their `@register(...)` decorators run.
+
+    A worker is a separate process from whatever defined the handlers, so it has
+    to be told where they live (`--handlers` / `WORKER_HANDLERS`).
+    """
+    import importlib
+
+    for name in modules:
+        importlib.import_module(name)
+        logger.info("loaded handlers from %s", name)
+
+
 def registered_names() -> list[str]:
     return sorted(_REGISTRY)
 

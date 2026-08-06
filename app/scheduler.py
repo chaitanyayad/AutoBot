@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.broker import TaskMessage, get_broker
 from app.dag import get_runnable_tasks, is_run_failed, is_run_finished, validate_definition
+from app.retry import backoff_delay, should_retry
 from app.models import (
     RUN_COMPLETED,
     RUN_FAILED,
@@ -119,13 +120,72 @@ def report_result(
     The single place a task leaves the running state — used by the worker and by
     the development `/simulate` endpoint, so both drive the state machine
     identically.
+
+    A failure with retries remaining is re-queued with exponential backoff rather
+    than failing the run. Only an exhausted task is marked `failed`, and it is
+    also parked on the dead letter queue.
     """
-    task.status = TASK_SUCCESS if succeed else TASK_FAILED
+    if succeed:
+        task.status = TASK_SUCCESS
+        task.completed_at = _utcnow()
+        task.error_message = None
+        session.flush()
+        resolve(session, task.run_id)
+        return session.get(WorkflowRun, task.run_id)
+
+    task.error_message = error
+
+    if should_retry(task.retry_count, task.max_retries):
+        return _requeue_for_retry(session, task)
+
+    task.status = TASK_FAILED
     task.completed_at = _utcnow()
-    task.error_message = error if not succeed else None
     session.flush()
 
+    get_broker().dead_letter(
+        TaskMessage(
+            task_id=str(task.id),
+            run_id=str(task.run_id),
+            task_name=task.task_name,
+            attempt=task.retry_count,
+            reason=f"exhausted {task.max_retries} retries: {error}",
+        )
+    )
+    logger.warning(
+        "task %s failed permanently after %s retries", task.task_name, task.retry_count
+    )
+
     resolve(session, task.run_id)
+    return session.get(WorkflowRun, task.run_id)
+
+
+def _requeue_for_retry(session: Session, task: Task) -> WorkflowRun:
+    """Put a failed task back on the queue after a backoff delay."""
+    task.retry_count += 1
+    task.status = TASK_QUEUED
+    # Clear the previous attempt's execution record; the task has not completed.
+    task.worker_id = None
+    task.started_at = None
+    task.completed_at = None
+    session.flush()
+
+    delay = backoff_delay(task.retry_count)
+    get_broker().publish(
+        TaskMessage(
+            task_id=str(task.id),
+            run_id=str(task.run_id),
+            task_name=task.task_name,
+            attempt=task.retry_count,
+        ),
+        delay=delay,
+    )
+    logger.info(
+        "retry %s/%s for %s in %.2fs",
+        task.retry_count,
+        task.max_retries,
+        task.task_name,
+        delay,
+    )
     return session.get(WorkflowRun, task.run_id)
 
 

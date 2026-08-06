@@ -20,10 +20,29 @@ load_dotenv()
 SQLITE_URL = "sqlite+pysqlite:///:memory:"
 POSTGRES_URL = "postgresql+psycopg://orchestrator:orchestrator@localhost:5432/orchestrator"
 
-# TEST_DATABASE_URL wins, then whatever the app is configured with, then the default.
-TEST_DATABASE_URL = (
-    os.getenv("TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or POSTGRES_URL
-)
+
+def _test_database_url() -> str:
+    """Pick a database for the suite, never the application's own.
+
+    The fixtures TRUNCATE between tests, so pointing them at DATABASE_URL would
+    destroy real data on every run. The app's URL is therefore only used to
+    locate the *server*; the suite always works in a separate `<name>_test`
+    database, created on demand.
+    """
+    explicit = os.getenv("TEST_DATABASE_URL")
+    if explicit:
+        return explicit
+
+    app_url = os.getenv("DATABASE_URL") or POSTGRES_URL
+    if app_url.startswith("sqlite"):
+        return app_url
+
+    base, _, name = app_url.rpartition("/")
+    name = name.split("?")[0]
+    return f"{base}/{name}_test" if not name.endswith("_test") else app_url
+
+
+TEST_DATABASE_URL = _test_database_url()
 IS_SQLITE = TEST_DATABASE_URL.startswith("sqlite")
 
 os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
@@ -75,9 +94,28 @@ def _enable_simulate_endpoint(monkeypatch):
     monkeypatch.setattr(config, "ENABLE_SIMULATE_ENDPOINT", True)
 
 
+def _ensure_test_database() -> None:
+    """Create the `_test` database if it does not exist yet."""
+    import psycopg
+
+    base, _, name = TEST_DATABASE_URL.rpartition("/")
+    admin_dsn = f"{base}/postgres".replace("postgresql+psycopg://", "postgresql://")
+    with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=5) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (name,)
+        ).fetchone()
+        if not exists:
+            conn.execute(f'CREATE DATABASE "{name}"')
+
+
 @pytest.fixture(scope="session")
 def _postgres_engine():
     """One engine and one schema for the whole session; tables are emptied per test."""
+    try:
+        _ensure_test_database()
+    except Exception:
+        pass  # fall through to the connection check below for a clear message
+
     eng = create_engine(TEST_DATABASE_URL, future=True)
     try:
         with eng.connect() as conn:

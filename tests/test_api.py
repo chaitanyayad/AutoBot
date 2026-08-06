@@ -20,6 +20,13 @@ THREE_TASK_LINEAR = {
     ],
 }
 
+# Retries are Phase 3 behaviour; tests that assert a failure is *permanent* use
+# this variant so the intent is explicit rather than inherited.
+THREE_TASK_NO_RETRIES = {
+    "name": "linear_no_retries",
+    "workflow": [dict(node, max_retries=0) for node in THREE_TASK_LINEAR["workflow"]],
+}
+
 
 def register(client, definition):
     response = client.post("/workflows", json=definition)
@@ -130,7 +137,7 @@ def test_fan_out_fan_in_resolution_order(client):
 
 
 def test_failed_task_fails_the_run_and_halts_downstream(client):
-    workflow_id = register(client, THREE_TASK_LINEAR)
+    workflow_id = register(client, THREE_TASK_NO_RETRIES)
     run_id = client.post(f"/workflows/{workflow_id}/trigger").json()["id"]
 
     run = complete(client, run_id, "a", succeed=False)
@@ -173,10 +180,10 @@ def test_failure_waits_for_in_flight_siblings(client):
     fan_out = {
         "name": "fan_out",
         "workflow": [
-            {"id": "root", "depends_on": []},
-            {"id": "x", "depends_on": ["root"]},
-            {"id": "y", "depends_on": ["root"]},
-            {"id": "end", "depends_on": ["x", "y"]},
+            {"id": "root", "depends_on": [], "max_retries": 0},
+            {"id": "x", "depends_on": ["root"], "max_retries": 0},
+            {"id": "y", "depends_on": ["root"], "max_retries": 0},
+            {"id": "end", "depends_on": ["x", "y"], "max_retries": 0},
         ],
     }
     workflow_id = register(client, fan_out)

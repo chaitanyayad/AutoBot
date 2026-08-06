@@ -17,7 +17,7 @@ import socket
 import sys
 import uuid
 
-from app import config, executors, scheduler
+from app import config, executors, recovery, scheduler
 from app.broker import TaskMessage, get_broker
 from app.db import SessionLocal
 from app.models import TASK_QUEUED, TASK_RUNNING, Task
@@ -35,6 +35,7 @@ class Worker:
         self.id = worker_id or make_worker_id()
         self.session_factory = session_factory
         self._stopping = False
+        self._heartbeat: recovery.HeartbeatThread | None = None
 
     # --- message handling ---------------------------------------------------
 
@@ -62,6 +63,7 @@ class Worker:
                 return True
 
             scheduler.claim(session, task, self.id)
+            recovery.heartbeat(session, self.id, status=recovery.WORKER_BUSY)
             session.commit()
 
             ctx = executors.TaskContext(
@@ -83,6 +85,7 @@ class Worker:
                 return True
 
             scheduler.report_result(session, task, succeed=True)
+            recovery.heartbeat(session, self.id, status=recovery.WORKER_IDLE)
             session.commit()
             logger.info("task %s succeeded", task.task_name)
             return True
@@ -94,13 +97,33 @@ class Worker:
 
     # --- lifecycle ----------------------------------------------------------
 
-    def run(self) -> None:
+    def start_heartbeat(self, sweep: bool = True) -> None:
+        with self.session_factory() as session:
+            recovery.register_worker(session, self.id)
+            session.commit()
+        self._heartbeat = recovery.HeartbeatThread(
+            self.id, self.session_factory, sweep=sweep
+        )
+        self._heartbeat.start()
+
+    def run(self, heartbeat: bool = True) -> None:
         broker = get_broker()
+        if heartbeat:
+            self.start_heartbeat()
         logger.info("worker %s consuming from %s", self.id, config.TASK_QUEUE)
-        broker.consume(self.handle)
+        try:
+            broker.consume(self.handle)
+        finally:
+            self._stop_heartbeat()
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
+            self._heartbeat = None
 
     def stop(self, *_args) -> None:
         self._stopping = True
+        self._stop_heartbeat()
         logger.info("worker %s stopping", self.id)
 
 
@@ -113,6 +136,17 @@ def main(argv: list[str] | None = None) -> int:
         default=0.0,
         help="seconds the default handler sleeps, to make parallelism visible",
     )
+    parser.add_argument(
+        "--handlers",
+        default=None,
+        help="comma-separated modules to import for @register handlers "
+        "(defaults to WORKER_HANDLERS)",
+    )
+    parser.add_argument(
+        "--no-heartbeat",
+        action="store_true",
+        help="skip the heartbeat/recovery thread",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -122,12 +156,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     executors.set_default_duration(args.task_duration)
 
+    modules = (
+        [m.strip() for m in args.handlers.split(",") if m.strip()]
+        if args.handlers
+        else config.WORKER_HANDLERS
+    )
+    executors.load_handler_modules(modules)
+
     worker = Worker(worker_id=args.worker_id)
     signal.signal(signal.SIGINT, worker.stop)
     signal.signal(signal.SIGTERM, worker.stop)
 
     try:
-        worker.run()
+        worker.run(heartbeat=not args.no_heartbeat)
     except KeyboardInterrupt:
         pass
     return 0

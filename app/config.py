@@ -34,6 +34,33 @@ TASK_QUEUE = os.getenv("TASK_QUEUE", "task_queue")
 # workers rather than letting one greedily buffer the queue.
 WORKER_PREFETCH = int(os.getenv("WORKER_PREFETCH", "1"))
 
+DEAD_LETTER_QUEUE = os.getenv("DEAD_LETTER_QUEUE", "task_queue.dead")
+
+# Comma-separated modules a worker imports at startup so their @register("...")
+# handlers are known. Without this a standalone worker only has default_handler.
+WORKER_HANDLERS = [
+    m.strip() for m in os.getenv("WORKER_HANDLERS", "").split(",") if m.strip()
+]
+
+# --- retry ------------------------------------------------------------------
+
+# delay = RETRY_BASE_DELAY * 2 ** (attempt - 1), capped, plus jitter.
+RETRY_BASE_DELAY = float(os.getenv("RETRY_BASE_DELAY", "1.0"))
+RETRY_MAX_DELAY = float(os.getenv("RETRY_MAX_DELAY", "60.0"))
+# Fraction of the delay applied as random jitter, so a burst of tasks failing
+# together does not retry in lockstep.
+RETRY_JITTER = float(os.getenv("RETRY_JITTER", "0.1"))
+
+# --- fault tolerance --------------------------------------------------------
+
+# How often a worker updates workers.last_heartbeat.
+HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "5.0"))
+# A worker silent for longer than this is presumed dead and its running tasks
+# are reclaimed. Must be comfortably larger than HEARTBEAT_INTERVAL.
+HEARTBEAT_TIMEOUT = float(os.getenv("HEARTBEAT_TIMEOUT", "30.0"))
+# How often each worker sweeps for tasks orphaned by a dead worker.
+RECOVERY_INTERVAL = float(os.getenv("RECOVERY_INTERVAL", "15.0"))
+
 # --- development --------------------------------------------------------------
 
 # The Phase 1 stand-in for a worker. Real workers exist as of Phase 2, so this is

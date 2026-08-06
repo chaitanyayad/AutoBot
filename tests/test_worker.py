@@ -35,6 +35,15 @@ def worker(session_factory):
     return Worker(worker_id="test-worker-1", session_factory=session_factory)
 
 
+def no_retries(definition: dict) -> dict:
+    """Same DAG with the retry budget set to zero — for tests asserting that a
+    failure is permanent rather than exercising the Phase 3 retry path."""
+    return {
+        "name": definition["name"] + "_no_retries",
+        "workflow": [dict(node, max_retries=0) for node in definition["workflow"]],
+    }
+
+
 def trigger(client, definition):
     workflow_id = client.post("/workflows", json=definition).json()["id"]
     return client.post(f"/workflows/{workflow_id}/trigger").json()["id"]
@@ -55,7 +64,7 @@ def test_trigger_publishes_the_root_task(client, broker):
 
 def test_message_carries_task_identity(client, broker):
     run_id = trigger(client, LINEAR)
-    message = broker._queue[0]
+    message = broker.messages()[0]
     assert message.task_name == "a"
     assert message.run_id == run_id
     assert message.attempt == 0
@@ -123,7 +132,7 @@ def test_raising_handler_marks_task_failed_and_halts_the_run(client, broker, wor
     def explode(ctx):
         raise RuntimeError("kaboom")
 
-    run_id = trigger(client, LINEAR)
+    run_id = trigger(client, no_retries(LINEAR))
     drain(broker, worker)
 
     run = client.get(f"/runs/{run_id}").json()
@@ -141,7 +150,7 @@ def test_failure_does_not_stall_an_independent_branch(client, broker, worker):
     def explode(ctx):
         raise RuntimeError("branch x is broken")
 
-    run_id = trigger(client, FAN_OUT)
+    run_id = trigger(client, no_retries(FAN_OUT))
     drain(broker, worker)
 
     run = client.get(f"/runs/{run_id}").json()
@@ -159,7 +168,7 @@ def test_duplicate_delivery_executes_once(client, broker, worker):
     executors.register("a")(lambda ctx: runs.append(1))
 
     trigger(client, LINEAR)
-    duplicate = broker._queue[0]
+    duplicate = broker.messages()[0]
     broker.publish(duplicate)  # same task delivered twice
 
     drain(broker, worker)
