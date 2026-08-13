@@ -163,6 +163,7 @@ def resolve(session: Session, run_id: uuid.UUID) -> list[Task]:
     that dispatches work goes through here, which is what makes the run lock a
     single choke point rather than something each caller has to remember.
     """
+    lock_run(session, run_id)
     tasks = load_tasks(session, run_id)
     runnable = get_runnable_tasks(tasks)
     if runnable:
