@@ -200,13 +200,13 @@ def test_only_one_of_many_simultaneous_claims_wins(
     won: list[str] = []
     lock = threading.Lock()
 
-    def contend(name):
+    def contend(worker_id):
         with session_factory() as session:
-            task = task_named(session, run_id, name)
-            barrier.wait()
-            if scheduler.claim(session, task, name):
+            task = task_named(session, run_id, "split")
+            barrier.wait()  # every connection arrives at the claim together
+            if scheduler.claim(session, task, worker_id):
                 with lock:
-                    won.append(name)
+                    won.append(worker_id)
             session.commit()
 
     threads = [
