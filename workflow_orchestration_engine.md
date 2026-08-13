@@ -249,10 +249,25 @@ while True:
 - Verified live: retry backoff 1.09s → 1.99s then success; exhausted task parked in the DLQ;
   worker killed mid-task and its orphan reclaimed by another worker
 
-### Phase 4 — Parallel Execution
-- [ ] Run 3+ workers simultaneously via Docker Compose
-- [ ] Test a fan-out DAG (one task feeds two parallel tasks)
-- [ ] Verify no double-execution (atomic task claim via DB lock or RabbitMQ ack)
+### Phase 4 — Parallel Execution ✅
+- [x] Run 3+ workers simultaneously via Docker Compose — `Dockerfile` + `docker-compose.yml`
+  (`api` + `worker` × 3 from one image; `--scale worker=N` for more)
+- [x] Test a fan-out DAG (one task feeds two parallel tasks) — `examples/fan_out.json`,
+  `scripts/parallel_demo.py`, and barrier-based tests that only pass if workers
+  are genuinely executing at the same instant
+- [x] Verify no double-execution — `scheduler.claim()` is a compare-and-set
+  (`UPDATE … WHERE id = ? AND status = 'queued'`), so RabbitMQ's at-least-once
+  delivery becomes exactly-once execution
+- [x] Two further races that only appear with several workers, both found and fixed here:
+  - `resolve()` runs under the run's row lock — otherwise sibling branches finishing
+    together each miss the fan-in they jointly unblocked and the run hangs at 50%
+  - publishes are deferred to after commit — otherwise a worker can consume a message
+    before the row authorising it is visible, decline it, and strand the task
+- [x] Recovery sweep takes orphans `FOR UPDATE SKIP LOCKED`, so two sweeping workers
+  cannot burn two retry attempts on one failure
+- 14 new tests in `tests/test_parallel.py` (88 total); each was checked to fail with
+  its mechanism removed. Verified live: 33-node DAG over 5 containerised workers,
+  every task executed exactly once, 8s of task time in 4.3s wall clock on the 6-shard demo
 
 ### Phase 5 — Scheduling
 - [ ] Cron-style triggers: `"schedule": "0 9 * * *"`

@@ -5,10 +5,10 @@ runs first, what runs in parallel, and when the run is complete.
 
 Full project plan and roadmap: [workflow_orchestration_engine.md](workflow_orchestration_engine.md)
 
-**Status: Phases 1–3 complete.** The DAG engine resolves dependencies, real workers
-execute tasks over RabbitMQ, and failures retry with exponential backoff before
-landing in a dead letter queue. Tasks orphaned by a dead worker are reclaimed.
-Parallel execution across multiple workers is Phase 4.
+**Status: Phases 1–4 complete.** The DAG engine resolves dependencies, a pool of
+workers executes tasks over RabbitMQ in parallel, and failures retry with
+exponential backoff before landing in a dead letter queue. Tasks orphaned by a
+dead worker are reclaimed, and no task can ever be executed twice.
 
 ---
 
@@ -28,12 +28,24 @@ Parallel execution across multiple workers is Phase 4.
   ([app/retry.py](app/retry.py))
 - **Fault tolerance** — worker heartbeats and recovery of tasks orphaned by a dead
   worker ([app/recovery.py](app/recovery.py))
-- **74 passing tests**, including real-RabbitMQ round trips, the delayed-retry
-  round trip, and the fan-out/fan-in execution order
+- **Parallel execution** — a pool of workers on one run, with an atomic task claim
+  and a per-run scheduler lock ([app/scheduler.py](app/scheduler.py))
+- **Docker Compose** — postgres, rabbitmq, the API and three workers, one command
+  ([docker-compose.yml](docker-compose.yml))
+- **88 passing tests**, including real-RabbitMQ round trips, the delayed-retry
+  round trip, and concurrency tests that each fail if their mechanism is removed
 
 ---
 
 ## Quick start
+
+```bash
+# The whole stack — postgres, rabbitmq, the API and three workers
+docker compose up -d --build
+python scripts/parallel_demo.py    # watch a fan-out DAG spread across them
+```
+
+Or piece by piece:
 
 ```bash
 pip install -r requirements.txt
@@ -47,7 +59,7 @@ cp .env.example .env
 docker compose up -d postgres rabbitmq
 python -m pytest -q
 
-# 3. Run the stack: API in one shell, worker in another
+# 3. Run the stack by hand: API in one shell, worker in another
 uvicorn app.main:app --reload      # docs at http://localhost:8000/docs
 python -m app.worker               # add --task-duration 0.5 to watch it work
 ```
@@ -78,7 +90,7 @@ If a native Postgres already owns port 5432, set `POSTGRES_PORT` in `.env` (e.g.
 | `POST` | `/runs/{run_id}/tasks/{name}/simulate` | Dev only, **off by default** (`ENABLE_SIMULATE_ENDPOINT`) |
 | `GET` | `/health` | Liveness |
 
-`/cancel` and `/dashboard` from the plan arrive with Phases 3 and 6.
+`/cancel` and `/dashboard` from the plan arrive with the dashboard in Phase 6.
 
 ### Example
 
@@ -157,8 +169,32 @@ worker has gone silent past `HEARTBEAT_TIMEOUT` and pushes them back through the
 same retry path, so a task that repeatedly kills its worker still exhausts its
 budget instead of looping.
 
-> Verified on both backends: 35/35 against a live Postgres 16 (the default) and
-> 35/35 on SQLite.
+### Parallel execution
+
+Workers are interchangeable and stateless; scale them with
+`docker compose up -d --scale worker=5`. `WORKER_PREFETCH=1` keeps one unacked
+message per worker, so RabbitMQ spreads a wave across idle workers instead of
+letting the first one buffer it.
+
+Running several workers on one graph breaks three things that a single worker
+hides. Each is fixed in [app/scheduler.py](app/scheduler.py), and each has a test
+in [tests/test_parallel.py](tests/test_parallel.py) that fails when its mechanism
+is removed:
+
+| Race | What goes wrong | Fix |
+|------|-----------------|-----|
+| Two workers claim one task | Both read `queued`, both execute it | `claim()` is a compare-and-set: the status precondition lives in the UPDATE's `WHERE`, so exactly one worker matches a row |
+| Sibling branches finish together | Neither sees the other's uncommitted success, so neither releases the fan-in and the run hangs at 50% | `resolve()` takes the run's row lock, so whoever commits last always reads the complete set |
+| A message overtakes its own transaction | The worker reads the task as still `pending`, declines it, and the delivery is gone | Publishes are held until the transaction commits, making Postgres the only authority on what was dispatched |
+| Two workers sweep one orphan | Both push it through the retry path, burning two attempts on one failure | The recovery sweep selects orphans `FOR UPDATE SKIP LOCKED` |
+
+Duplicate delivery is therefore harmless by design — RabbitMQ promises
+*at-least-once*, and the database is what turns that into exactly-once execution.
+
+> Verified live on the compose stack: a 33-node DAG across 5 workers, every task
+> claimed by exactly one worker (32 handler invocations for 32 default-handler
+> tasks, no duplicates), with a flaky task still exhausting its backoff and
+> succeeding on attempt 3.
 
 ---
 
@@ -179,19 +215,24 @@ app/
   main.py        FastAPI endpoints
   schemas.py     request/response models
 examples/handlers.py     sample handlers (flaky, doomed, slow)
+examples/fan_out.json    six parallel shards between a split and a merge
 scripts/manual_test.py   DAG resolution walkthrough (no services needed)
-tests/                   74 tests (unit + API + worker + retry/recovery)
+scripts/parallel_demo.py drives the live stack and reports the worker spread
+tests/                   88 tests (unit + API + worker + retry/recovery + parallel)
 schema.sql               canonical Postgres DDL
-docker-compose.yml       postgres + rabbitmq
+Dockerfile               one image, run as either the API or a worker
+docker-compose.yml       postgres + rabbitmq + api + 3 workers
 ```
 
 ---
 
-## Next: Phase 4 — parallel execution
+## Next: Phase 5 — scheduling
 
-1. Run 3+ workers simultaneously via Docker Compose
-2. Test a fan-out DAG across real concurrent workers
-3. **Atomic task claim** — the known gap. A duplicate *delivery* is handled (the
-   worker re-reads status and skips anything not `queued`), but two workers
-   claiming the same task simultaneously could still both execute it. Needs
-   `SELECT … FOR UPDATE SKIP LOCKED` in `Worker.handle`.
+1. Cron-style triggers on a workflow definition (`"schedule": "0 9 * * *"`)
+2. APScheduler inside the API process
+3. Persist scheduled workflows and auto-trigger them
+
+Known gap carried forward: a publish that fails *after* its transaction commits
+leaves a task `queued` with no message on the queue. It is visible in the table,
+but nothing sweeps for it yet — the recovery pass only reclaims `running` tasks
+whose worker died.

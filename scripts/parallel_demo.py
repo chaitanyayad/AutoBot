@@ -11,8 +11,9 @@ It registers the workflow, triggers a run, polls until it finishes, and then
 reports the two things Phase 4 claims: every task ran exactly once, and the
 parallel wave was spread across the workers instead of absorbed by one.
 
-The speedup line is the honest measure: with `TASK_DURATION=1.0` and six shards,
-one worker would need ~6s of task time, three need ~2s.
+With the compose default of `TASK_DURATION=1.0`, six shards are ~6s of task time
+that three workers should clear in ~2s, inside a ~4s run — one second each for
+the split and the merge, which have nothing to run alongside them.
 """
 
 from __future__ import annotations
@@ -81,7 +82,13 @@ def report(tasks: list[dict], elapsed: float, duration_hint: float) -> int:
     print(f"\nwall clock:   {elapsed:.2f}s")
     print(f"task time:    {task_seconds:.2f}s across {len(tasks)} tasks")
     if elapsed > 0:
-        print(f"speedup:      {task_seconds / elapsed:.2f}x vs running them one at a time")
+        concurrency = task_seconds / elapsed
+        print(f"concurrency:  {concurrency:.2f} tasks executing at once, on average")
+        if concurrency < 1:
+            # Retry backoff and the queue round trip are wall clock but not task
+            # time, so the average only reflects parallelism when work dominates.
+            print("              (wall clock here is mostly waiting, not executing —"
+                  " raise TASK_DURATION to see the parallelism)")
 
     failures = [t["task_name"] for t in tasks if t["status"] != "success"]
     if failures:
