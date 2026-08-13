@@ -1,0 +1,16 @@
+{
+  "name": "fan_out_demo",
+  "workflow": [
+    { "id": "split",   "depends_on": [] },
+
+    { "id": "shard_1", "depends_on": ["split"] },
+    { "id": "shard_2", "depends_on": ["split"] },
+    { "id": "shard_3", "depends_on": ["split"] },
+    { "id": "shard_4", "depends_on": ["split"] },
+    { "id": "shard_5", "depends_on": ["split"] },
+    { "id": "shard_6", "depends_on": ["split"] },
+
+    { "id": "merge",   "depends_on": ["shard_1", "shard_2", "shard_3",
+                                      "shard_4", "shard_5", "shard_6"] }
+  ]
+}

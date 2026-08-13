@@ -42,6 +42,11 @@ WORKER_HANDLERS = [
     m.strip() for m in os.getenv("WORKER_HANDLERS", "").split(",") if m.strip()
 ]
 
+# Seconds the stand-in handler sleeps, so parallelism across workers is visible
+# rather than finishing faster than the dispatch round trip. `--task-duration`
+# overrides it.
+TASK_DURATION = float(os.getenv("TASK_DURATION", "0.0"))
+
 # --- retry ------------------------------------------------------------------
 
 # delay = RETRY_BASE_DELAY * 2 ** (attempt - 1), capped, plus jitter.

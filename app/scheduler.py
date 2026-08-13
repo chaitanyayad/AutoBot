@@ -1,14 +1,24 @@
 """Run lifecycle: materialise task rows, resolve what is runnable, close out runs.
 
 Phase 1 stops at "which tasks are runnable". Phase 2 replaces `dispatch` with a
-real RabbitMQ publish; nothing else in here needs to change.
+real RabbitMQ publish. Phase 4 makes the whole thing safe to run from several
+workers at once, which costs three rules:
+
+1. **A claim is a compare-and-set** — `claim()` writes the status precondition
+   into the UPDATE, so exactly one worker can take a task.
+2. **The resolve step is serialised per run** — `resolve()` locks the run row, so
+   two workers finishing sibling branches cannot both miss the fan-in they
+   jointly unblocked.
+3. **Publishes happen after commit** — a message is only visible once the row
+   that authorises it is.
 """
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
 
 from app import config
@@ -33,6 +43,64 @@ logger = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# --- publish after commit ---------------------------------------------------
+
+_OUTBOX = "scheduler_outbox"
+
+
+@dataclass(frozen=True)
+class _Publication:
+    message: TaskMessage
+    delay: float = 0.0
+    dead_letter: bool = False
+
+
+def _publish_on_commit(
+    session: Session, message: TaskMessage, *, delay: float = 0.0, dead_letter: bool = False
+) -> None:
+    """Hold a message until the transaction that authorised it commits.
+
+    Publishing inline is a dual write across two systems: the message is visible
+    to workers before — or, if the transaction rolls back, *without* — the row
+    that says the task was dispatched. A worker that wins that race reads the
+    task as still `pending`, declines it, and the delivery is gone for good,
+    leaving the run stalled. The window is a single network round trip, which is
+    nothing until several idle workers are racing to be first.
+
+    Deferring the publish makes Postgres the sole authority on what was
+    dispatched, at the cost of the opposite risk: a broker outage between commit
+    and publish leaves a `queued` task with no message. That one is at least
+    visible in the table and recoverable; the reverse is not.
+    """
+    session.info.setdefault(_OUTBOX, []).append(
+        _Publication(message=message, delay=delay, dead_letter=dead_letter)
+    )
+
+
+@event.listens_for(Session, "after_commit")
+def _flush_outbox(session: Session) -> None:
+    broker = None
+    for publication in session.info.pop(_OUTBOX, ()):
+        try:
+            broker = broker or get_broker()
+            if publication.dead_letter:
+                broker.dead_letter(publication.message)
+            else:
+                broker.publish(publication.message, delay=publication.delay)
+        except Exception:
+            # The row is committed either way; losing the message is what the
+            # `queued` status is there to make visible.
+            logger.exception(
+                "failed to publish %s after commit", publication.message.task_name
+            )
+
+
+@event.listens_for(Session, "after_rollback")
+@event.listens_for(Session, "after_soft_rollback")
+def _discard_outbox(session: Session, *_args) -> None:
+    session.info.pop(_OUTBOX, None)
 
 
 def create_run(session: Session, workflow: Workflow) -> WorkflowRun:
@@ -69,11 +137,33 @@ def load_tasks(session: Session, run_id: uuid.UUID) -> list[Task]:
     )
 
 
+def lock_run(session: Session, run_id: uuid.UUID) -> WorkflowRun | None:
+    """Take the run's row lock, serialising every scheduler tick for that run.
+
+    Two workers finishing sibling branches at the same moment both ask "is the
+    fan-in runnable now?". Under READ COMMITTED neither sees the other's
+    uncommitted success, so both can answer no and the run stalls forever with
+    nothing left to wake it. Locking the run row first means the second worker
+    waits, then reads a snapshot that includes the first one's commit — so
+    whoever finishes last always sees the completed set and releases the fan-in.
+
+    Postgres only: SQLite serialises writers globally, so the lock is redundant
+    there and `FOR UPDATE` is not supported anyway.
+    """
+    statement = select(WorkflowRun).where(WorkflowRun.id == run_id)
+    if session.get_bind().dialect.name == "postgresql":
+        statement = statement.with_for_update()
+    return session.scalar(statement)
+
+
 def resolve(session: Session, run_id: uuid.UUID) -> list[Task]:
     """The scheduler tick: find newly runnable tasks and hand them to dispatch.
 
-    Called after a run is triggered and after every task completion.
+    Called after a run is triggered and after every task completion. Every path
+    that dispatches work goes through here, which is what makes the run lock a
+    single choke point rather than something each caller has to remember.
     """
+    lock_run(session, run_id)
     tasks = load_tasks(session, run_id)
     runnable = get_runnable_tasks(tasks)
     if runnable:
@@ -84,26 +174,26 @@ def resolve(session: Session, run_id: uuid.UUID) -> list[Task]:
 
 
 def dispatch(session: Session, tasks: list[Task]) -> None:
-    """Mark tasks `queued` and publish them to the broker.
+    """Mark tasks `queued` and hand their messages to the post-commit outbox.
 
-    The status change is flushed *before* publishing, so a worker that picks the
-    message up immediately never sees the task as still `pending`. If publishing
-    then fails the task is left `queued` with nothing to run it — Phase 3's
-    heartbeat/timeout recovery is what reclaims that case.
+    The status change is flushed first, so the row that authorises the work is
+    written before the message announcing it exists — see `_publish_on_commit`.
+    If the publish then fails, the task is left `queued` with nothing to run it,
+    which is at least visible in the table.
     """
-    broker = get_broker()
     for task in tasks:
         task.status = TASK_QUEUED
     session.flush()
 
     for task in tasks:
-        broker.publish(
+        _publish_on_commit(
+            session,
             TaskMessage(
                 task_id=str(task.id),
                 run_id=str(task.run_id),
                 task_name=task.task_name,
                 attempt=task.retry_count,
-            )
+            ),
         )
     logger.debug("dispatched %s", [t.task_name for t in tasks])
 
@@ -142,14 +232,16 @@ def report_result(
     task.completed_at = _utcnow()
     session.flush()
 
-    get_broker().dead_letter(
+    _publish_on_commit(
+        session,
         TaskMessage(
             task_id=str(task.id),
             run_id=str(task.run_id),
             task_name=task.task_name,
             attempt=task.retry_count,
             reason=f"exhausted {task.max_retries} retries: {error}",
-        )
+        ),
+        dead_letter=True,
     )
     logger.warning(
         "task %s failed permanently after %s retries", task.task_name, task.retry_count
@@ -170,7 +262,8 @@ def _requeue_for_retry(session: Session, task: Task) -> WorkflowRun:
     session.flush()
 
     delay = backoff_delay(task.retry_count)
-    get_broker().publish(
+    _publish_on_commit(
+        session,
         TaskMessage(
             task_id=str(task.id),
             run_id=str(task.run_id),
@@ -189,12 +282,28 @@ def _requeue_for_retry(session: Session, task: Task) -> WorkflowRun:
     return session.get(WorkflowRun, task.run_id)
 
 
-def claim(session: Session, task: Task, worker_id: str) -> None:
-    """Move a dispatched task into `running` on behalf of a worker."""
-    task.status = TASK_RUNNING
-    task.worker_id = worker_id
-    task.started_at = _utcnow()
-    session.flush()
+def claim(session: Session, task: Task, worker_id: str) -> bool:
+    """Try to move a dispatched task into `running`. True if this worker won it.
+
+    Compare-and-set: the precondition (`status = 'queued'`) lives in the UPDATE's
+    WHERE clause, so checking and taking the task are the same statement and
+    nothing can slip between them. Read-then-write cannot do this — under READ
+    COMMITTED two workers can both read `queued`, and RabbitMQ's own
+    at-least-once delivery makes that a matter of when, not if.
+
+    Racing workers serialise on the row lock; the loser's UPDATE is then
+    re-evaluated against the committed row, matches nothing, and reports False so
+    the caller declines the delivery instead of running the task a second time.
+    """
+    result = session.execute(
+        update(Task)
+        .where(Task.id == task.id, Task.status == TASK_QUEUED)
+        .values(status=TASK_RUNNING, worker_id=worker_id, started_at=_utcnow())
+        .execution_options(synchronize_session=False)
+    )
+    # The row now holds whatever the winner wrote — reload rather than assume.
+    session.expire(task)
+    return result.rowcount == 1
 
 
 def finalize_if_done(session: Session, run_id: uuid.UUID, tasks: list[Task] | None = None) -> WorkflowRun:

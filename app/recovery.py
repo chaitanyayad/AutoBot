@@ -13,7 +13,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import config, scheduler
@@ -96,12 +96,22 @@ def reclaim_orphaned_tasks(session: Session, timeout: float | None = None) -> li
         if _as_utc(row.last_heartbeat) is not None and _as_utc(row.last_heartbeat) >= cutoff
     }
 
-    running = session.scalars(select(Task).where(Task.status == TASK_RUNNING)).all()
+    # "Orphaned" is expressed in SQL rather than filtered in Python so the lock
+    # below covers exactly the rows this sweep intends to touch — a live worker's
+    # task is never locked out of reporting its own result.
+    orphaned = select(Task).where(
+        Task.status == TASK_RUNNING,
+        or_(Task.worker_id.is_(None), Task.worker_id.notin_(sorted(alive))),
+    )
+    # Every worker sweeps, so two of them can meet on the same orphan. SKIP
+    # LOCKED gives each row to exactly one sweeper and lets the others move on
+    # rather than queue up behind it — without that, both would push the task
+    # through the retry path and burn two attempts on one failure.
+    if session.get_bind().dialect.name == "postgresql":
+        orphaned = orphaned.with_for_update(skip_locked=True)
 
     reclaimed: list[Task] = []
-    for task in running:
-        if task.worker_id in alive:
-            continue
+    for task in session.scalars(orphaned).all():
         logger.warning(
             "reclaiming %s: worker %s is gone", task.task_name, task.worker_id
         )

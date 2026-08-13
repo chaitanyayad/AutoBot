@@ -17,17 +17,56 @@ services:
       timeout: 5s
       retries: 10
 
-  # Phase 2 brings workers online; the broker is here so the stack is ready.
   rabbitmq:
     image: rabbitmq:3-management-alpine
     ports:
       - "5672:5672"
-      - "15672:15672"
+      - "15672:15672"     # management UI: guest / guest
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+  api:
+    build: .
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment: &engine_env
+      # Container-internal addresses; the host's .env points at localhost and is
+      # deliberately not loaded here.
+      DATABASE_URL: postgresql+psycopg://orchestrator:orchestrator@postgres:5432/orchestrator
+      BROKER_URL: amqp://guest:guest@rabbitmq:5672/
+      TASK_QUEUE: task_queue
+      # One unacked message at a time, so RabbitMQ spreads a wave of runnable
+      # tasks across idle workers instead of letting the first one buffer them.
+      WORKER_PREFETCH: "1"
+      DEFAULT_MAX_RETRIES: "3"
+      WORKER_HANDLERS: examples.handlers
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # Three interchangeable workers. Each gets its own container hostname, so
+  # `hostname-pid` gives every one a distinct id in the workers table.
+  #   docker compose up -d --scale worker=5   to run more
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *engine_env
+      # Makes parallelism observable: without it tasks finish faster than the
+      # dispatch round trip and the run looks sequential.
+      TASK_DURATION: "${TASK_DURATION:-1.0}"
+    deploy:
+      replicas: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -20,7 +20,7 @@ import uuid
 from app import config, executors, recovery, scheduler
 from app.broker import TaskMessage, get_broker
 from app.db import SessionLocal
-from app.models import TASK_QUEUED, TASK_RUNNING, Task
+from app.models import Task
 
 logger = logging.getLogger("worker")
 
@@ -54,15 +54,20 @@ class Worker:
                 logger.warning("task %s no longer exists; dropping", message.task_id)
                 return True
 
-            # The database, not the message, decides whether this is still work.
-            # A duplicate delivery or a task already claimed elsewhere lands here.
-            if task.status != TASK_QUEUED:
+            # The database, not the message, decides whether this is still work,
+            # and it decides atomically. A duplicate delivery, a task another
+            # worker took first, and a message that outlived its task all land
+            # here as a lost claim.
+            if not scheduler.claim(session, task, self.id):
                 logger.info(
-                    "skipping %s: status is %s, not queued", task.task_name, task.status
+                    "declining %s: already %s on %s",
+                    task.task_name,
+                    task.status,
+                    task.worker_id or "no worker",
                 )
+                session.rollback()
                 return True
 
-            scheduler.claim(session, task, self.id)
             recovery.heartbeat(session, self.id, status=recovery.WORKER_BUSY)
             session.commit()
 
@@ -133,8 +138,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--task-duration",
         type=float,
-        default=0.0,
-        help="seconds the default handler sleeps, to make parallelism visible",
+        default=config.TASK_DURATION,
+        help="seconds the default handler sleeps, to make parallelism visible "
+        "(defaults to TASK_DURATION)",
     )
     parser.add_argument(
         "--handlers",
