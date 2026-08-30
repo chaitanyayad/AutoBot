@@ -71,3 +71,11 @@ RECOVERY_INTERVAL = float(os.getenv("RECOVERY_INTERVAL", "15.0"))
 # The Phase 1 stand-in for a worker. Real workers exist as of Phase 2, so this is
 # off unless explicitly enabled; it mutates run state without authentication.
 ENABLE_SIMULATE_ENDPOINT = _flag("ENABLE_SIMULATE_ENDPOINT")
+
+# --- scheduling (Phase 5) ----------------------------------------------------
+
+# Cron expressions on a workflow definition are interpreted in this timezone.
+SCHEDULER_TIMEZONE = os.getenv("SCHEDULER_TIMEZONE", "UTC")
+# Turned off in most tests (see conftest) so a background thread isn't started
+# for every test that spins up the app; scheduling tests opt back in.
+ENABLE_SCHEDULER = _flag("ENABLE_SCHEDULER", "true")
