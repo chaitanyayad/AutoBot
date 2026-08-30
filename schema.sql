@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     definition JSONB NOT NULL,
+    schedule TEXT,              -- cron expression, e.g. '0 9 * * *'; NULL = manual only
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
