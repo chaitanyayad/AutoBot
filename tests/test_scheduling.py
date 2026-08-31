@@ -74,3 +74,74 @@ def test_validate_cron_accepts_a_five_field_expression():
 def test_validate_cron_rejects_garbage():
     with pytest.raises(ValueError):
         cron.validate_cron("definitely not cron")
+
+
+# --- arming on registration ----------------------------------------------------
+
+
+def test_registering_a_scheduled_workflow_arms_a_job(client):
+    workflow_id = client.post("/workflows", json=scheduled("0 9 * * *")).json()["id"]
+    jobs = client.app.state.cron_scheduler.get_jobs()
+    assert any(job.id == f"workflow:{workflow_id}" for job in jobs)
+
+
+def test_registering_an_unscheduled_workflow_arms_nothing(client):
+    before = len(client.app.state.cron_scheduler.get_jobs())
+    client.post("/workflows", json=LINEAR)
+    after = len(client.app.state.cron_scheduler.get_jobs())
+    assert after == before
+
+
+# --- durability across a restart ----------------------------------------------
+
+
+def test_scheduled_workflows_are_re_armed_on_startup(session_factory):
+    """A schedule stored in the database is picked up by a fresh scheduler
+    instance with no registration call — this is what makes it survive a
+    process restart rather than only living in the first process's memory."""
+    with session_factory() as session:
+        workflow = Workflow(name="restart_test", definition=LINEAR, schedule="0 9 * * *")
+        session.add(workflow)
+        session.commit()
+        workflow_id = workflow.id
+
+    sched = cron.start(session_factory)
+    try:
+        jobs = sched.get_jobs()
+        assert any(job.id == f"workflow:{workflow_id}" for job in jobs)
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_unscheduled_workflows_are_not_armed_on_startup(session_factory):
+    with session_factory() as session:
+        session.add(Workflow(name="manual_only", definition=LINEAR, schedule=None))
+        session.commit()
+
+    sched = cron.start(session_factory)
+    try:
+        assert sched.get_jobs() == []
+    finally:
+        sched.shutdown(wait=False)
+
+
+# --- the job itself behaves like a manual trigger ------------------------------
+
+
+def test_scheduled_job_creates_and_resolves_a_run(session_factory):
+    with session_factory() as session:
+        workflow = Workflow(name="job_test", definition=LINEAR, schedule="0 9 * * *")
+        session.add(workflow)
+        session.commit()
+        workflow_id = workflow.id
+
+    cron._run_scheduled(str(workflow_id), session_factory)
+
+    with session_factory() as session:
+        runs = session.query(WorkflowRun).filter_by(workflow_id=workflow_id).all()
+        assert len(runs) == 1
+        assert runs[0].status == "running"
+
+
+def test_scheduled_job_for_a_deleted_workflow_does_not_raise(session_factory):
+    cron._run_scheduled(str(uuid.uuid4()), session_factory)  # must not raise
