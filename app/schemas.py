@@ -3,7 +3,9 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.cron import validate_cron
 
 
 class TaskNode(BaseModel):
@@ -15,6 +17,20 @@ class TaskNode(BaseModel):
 class WorkflowCreate(BaseModel):
     name: str = Field(min_length=1)
     workflow: list[TaskNode] = Field(min_length=1)
+    schedule: str | None = Field(
+        default=None, description="Cron expression, e.g. '0 9 * * *'. Omit for manual-only."
+    )
+
+    @field_validator("schedule")
+    @classmethod
+    def _validate_schedule(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        try:
+            validate_cron(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid cron expression {value!r}: {exc}") from exc
+        return value
 
 
 class WorkflowOut(BaseModel):
@@ -23,6 +39,7 @@ class WorkflowOut(BaseModel):
     id: uuid.UUID
     name: str
     definition: dict
+    schedule: str | None
     created_at: datetime
 
 
