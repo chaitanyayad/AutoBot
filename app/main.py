@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import config, scheduler
+from app import config, cron, db, scheduler
 from app.dag import DagValidationError, get_runnable_tasks
 from app.db import get_session, init_db
 from app.models import (
@@ -29,7 +29,15 @@ from app.schemas import RunDetail, RunOut, TaskOut, WorkflowCreate, WorkflowOut
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # The cron scheduler is process-wide: one BackgroundScheduler per API
+    # process, populated from every workflow that has a `schedule` at startup
+    # so schedules survive a restart (Phase 5). `db.SessionLocal` is looked up
+    # here rather than imported by name, so tests that swap it in before
+    # startup (see conftest.client) are honoured.
+    app.state.cron_scheduler = cron.start(db.SessionLocal) if config.ENABLE_SCHEDULER else None
     yield
+    if app.state.cron_scheduler is not None:
+        app.state.cron_scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -80,9 +88,13 @@ def register_workflow(payload: WorkflowCreate, session: Session = Depends(get_se
     except DagValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    workflow = Workflow(name=payload.name, definition=definition)
+    workflow = Workflow(name=payload.name, definition=definition, schedule=payload.schedule)
     session.add(workflow)
     session.commit()
+
+    if workflow.schedule and app.state.cron_scheduler is not None:
+        cron.add_job(app.state.cron_scheduler, workflow, db.SessionLocal)
+
     return workflow
 
 
