@@ -26,13 +26,17 @@ from app.broker import TaskMessage, get_broker
 from app.dag import get_runnable_tasks, is_run_failed, is_run_finished, validate_definition
 from app.retry import backoff_delay, should_retry
 from app.models import (
+    RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_RUNNING,
+    TASK_CANCELLED,
     TASK_FAILED,
+    TASK_PENDING,
     TASK_QUEUED,
     TASK_RUNNING,
     TASK_SUCCESS,
+    TERMINAL_RUN_STATUSES,
     Task,
     Workflow,
     WorkflowRun,
@@ -304,6 +308,41 @@ def claim(session: Session, task: Task, worker_id: str) -> bool:
     # The row now holds whatever the winner wrote — reload rather than assume.
     session.expire(task)
     return result.rowcount == 1
+
+
+def cancel_run(session: Session, run_id: uuid.UUID) -> WorkflowRun:
+    """Mark a run cancelled. Raises ValueError if it is already terminal.
+
+    This does not reach into a worker process to stop a `running` task — there
+    is no channel to do that over — so a task already `running` is left alone
+    and still reports its result normally; it just no longer unblocks anything
+    new (`resolve()` checks for a cancelled run before dispatching).
+
+    Everything *not* already running is moved to `cancelled` directly, rather
+    than left `pending`/`queued` forever with no status of its own:
+
+    - `pending` tasks were never going to run anyway once cancellation stops
+      `resolve()`, so this just makes that visible instead of implicit.
+    - `queued` tasks already have a message in flight, but marking the row
+      `cancelled` means a worker's `claim()` — a compare-and-set gated on
+      `status = 'queued'` — simply won't match it, so the delivery is declined
+      and the task never executes even though its message still exists.
+    """
+    run = lock_run(session, run_id)
+    if run is None:
+        raise ValueError(f"run {run_id} not found")
+    if run.status in TERMINAL_RUN_STATUSES:
+        raise ValueError(f"run is already {run.status}")
+    run.status = RUN_CANCELLED
+    run.completed_at = _utcnow()
+    session.execute(
+        update(Task)
+        .where(Task.run_id == run_id, Task.status.in_((TASK_PENDING, TASK_QUEUED)))
+        .values(status=TASK_CANCELLED)
+        .execution_options(synchronize_session=False)
+    )
+    session.flush()
+    return run
 
 
 def finalize_if_done(session: Session, run_id: uuid.UUID, tasks: list[Task] | None = None) -> WorkflowRun:
