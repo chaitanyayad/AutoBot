@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TIMESTAMPTZ,
     error_message TEXT,
     CONSTRAINT ck_tasks_status
-        CHECK (status IN ('pending','queued','running','success','failed')),
+        CHECK (status IN ('pending','queued','running','success','failed','cancelled')),
     CONSTRAINT uq_tasks_run_task_name UNIQUE (run_id, task_name)
 );
 
