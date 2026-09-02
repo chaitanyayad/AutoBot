@@ -148,6 +148,23 @@ def list_runs(session: Session = Depends(get_session)):
     return list(session.scalars(select(WorkflowRun).order_by(WorkflowRun.triggered_at.desc())))
 
 
+@app.post("/runs/{run_id}/cancel", response_model=RunDetail)
+def cancel_workflow_run(run_id: uuid.UUID, session: Session = Depends(get_session)):
+    """Stop dispatching further work for a run.
+
+    Tasks already queued or running are not force-stopped — nothing here can
+    reach into a worker process mid-execution — but no task newly unblocked by
+    their completion will be dispatched. See `scheduler.cancel_run`.
+    """
+    _get_run_or_404(session, run_id)
+    try:
+        run = scheduler.cancel_run(session, run_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    session.commit()
+    return _run_detail(session, run)
+
+
 @app.post("/runs/{run_id}/tasks/{task_name}/simulate", response_model=RunDetail)
 def simulate_task_result(
     run_id: uuid.UUID,
