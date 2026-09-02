@@ -166,8 +166,14 @@ def resolve(session: Session, run_id: uuid.UUID) -> list[Task]:
     Called after a run is triggered and after every task completion. Every path
     that dispatches work goes through here, which is what makes the run lock a
     single choke point rather than something each caller has to remember.
+
+    A cancelled run dispatches nothing further — tasks already in flight still
+    report back through `report_result`, but that call reaches here too, so the
+    check has to be first.
     """
-    lock_run(session, run_id)
+    run = lock_run(session, run_id)
+    if run is not None and run.status == RUN_CANCELLED:
+        return []
     tasks = load_tasks(session, run_id)
     runnable = get_runnable_tasks(tasks)
     if runnable:
@@ -218,7 +224,14 @@ def report_result(
     A failure with retries remaining is re-queued with exponential backoff rather
     than failing the run. Only an exhausted task is marked `failed`, and it is
     also parked on the dead letter queue.
+
+    A cancelled run skips the retry path even with a budget remaining — nothing
+    left is going to dispatch that requeue, so it would only sit on the queue
+    until the run's cancellation is undone, which never happens.
     """
+    run = session.get(WorkflowRun, task.run_id)
+    cancelled = run is not None and run.status == RUN_CANCELLED
+
     if succeed:
         task.status = TASK_SUCCESS
         task.completed_at = _utcnow()
@@ -229,7 +242,7 @@ def report_result(
 
     task.error_message = error
 
-    if should_retry(task.retry_count, task.max_retries):
+    if not cancelled and should_retry(task.retry_count, task.max_retries):
         return _requeue_for_retry(session, task)
 
     task.status = TASK_FAILED
