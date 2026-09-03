@@ -10,12 +10,14 @@ component that executes user code; the scheduler stays pure.
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import os
 import signal
 import socket
 import sys
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 
 from app import config, executors, recovery, scheduler
 from app.broker import TaskMessage, get_broker
@@ -23,6 +25,26 @@ from app.db import SessionLocal
 from app.models import Task
 
 logger = logging.getLogger("worker")
+
+
+def _capture_logs(stdout: io.StringIO, stderr: io.StringIO) -> str | None:
+    """Combine a handler's captured stdout/stderr for the dashboard (Phase 6).
+
+    Truncated from the front rather than dropped from the back — if a handler
+    floods its output, the *end* of the log (closest to what it was doing when
+    it succeeded or failed) is the useful part.
+    """
+    parts = []
+    if stdout.getvalue():
+        parts.append(f"--- stdout ---\n{stdout.getvalue()}")
+    if stderr.getvalue():
+        parts.append(f"--- stderr ---\n{stderr.getvalue()}")
+    if not parts:
+        return None
+    combined = "\n".join(parts)
+    if len(combined) > config.MAX_LOG_CHARS:
+        combined = "...(truncated)...\n" + combined[-config.MAX_LOG_CHARS :]
+    return combined
 
 
 def make_worker_id() -> str:
@@ -79,16 +101,20 @@ class Worker:
                 worker_id=self.id,
             )
 
+            stdout, stderr = io.StringIO(), io.StringIO()
             try:
-                executors.get_handler(task.task_name)(ctx)
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    executors.get_handler(task.task_name)(ctx)
             except Exception as exc:
                 logger.exception("task %s failed", task.task_name)
+                task.logs = _capture_logs(stdout, stderr)
                 scheduler.report_result(
                     session, task, succeed=False, error=f"{type(exc).__name__}: {exc}"
                 )
                 session.commit()
                 return True
 
+            task.logs = _capture_logs(stdout, stderr)
             scheduler.report_result(session, task, succeed=True)
             recovery.heartbeat(session, self.id, status=recovery.WORKER_IDLE)
             session.commit()

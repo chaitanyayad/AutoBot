@@ -79,3 +79,11 @@ SCHEDULER_TIMEZONE = os.getenv("SCHEDULER_TIMEZONE", "UTC")
 # Turned off in most tests (see conftest) so a background thread isn't started
 # for every test that spins up the app; scheduling tests opt back in.
 ENABLE_SCHEDULER = _flag("ENABLE_SCHEDULER", "true")
+
+# --- dashboard (Phase 6) -----------------------------------------------------
+
+# How often the dashboard's WebSocket re-polls a run and pushes an update.
+DASHBOARD_POLL_INTERVAL = float(os.getenv("DASHBOARD_POLL_INTERVAL", "1.0"))
+# Captured stdout/stderr per task attempt is truncated to this many characters
+# so a runaway handler can't grow a row without bound.
+MAX_LOG_CHARS = int(os.getenv("MAX_LOG_CHARS", "20000"))
