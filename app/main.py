@@ -148,6 +148,20 @@ def list_runs(session: Session = Depends(get_session)):
     return list(session.scalars(select(WorkflowRun).order_by(WorkflowRun.triggered_at.desc())))
 
 
+@app.get("/runs/{run_id}/tasks/{task_name}/logs")
+def get_task_logs(run_id: uuid.UUID, task_name: str, session: Session = Depends(get_session)):
+    """Captured stdout/stderr from the task's most recent attempt."""
+    _get_run_or_404(session, run_id)
+    task = session.scalar(
+        select(Task).where(Task.run_id == run_id, Task.task_name == task_name)
+    )
+    if task is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"task {task_name!r} not found in run {run_id}"
+        )
+    return {"task_name": task_name, "attempt": task.retry_count, "logs": task.logs}
+
+
 @app.post("/runs/{run_id}/cancel", response_model=RunDetail)
 def cancel_workflow_run(run_id: uuid.UUID, session: Session = Depends(get_session)):
     """Stop dispatching further work for a run.
