@@ -145,3 +145,55 @@ def test_cancel_does_not_retry_a_failure_on_the_cancelled_run(client, session):
     task = client.get(f"/runs/{run_id}/tasks").json()[0]
     assert task["status"] == "failed", "a cancelled run must not requeue a retry"
     assert task["retry_count"] == 0
+
+
+# --- per-task logs --------------------------------------------------------------
+
+
+def test_logs_capture_stdout_and_stderr(client, broker, worker):
+    @executors.register("a")
+    def noisy(ctx):
+        print("hello from stdout")
+        import sys
+        print("uh oh", file=sys.stderr)
+
+    run_id = trigger(client, {"name": "n", "workflow": [{"id": "a", "depends_on": []}]})
+    broker.consume(worker.handle)
+
+    logs = client.get(f"/runs/{run_id}/tasks/a/logs").json()
+    assert "hello from stdout" in logs["logs"]
+    assert "uh oh" in logs["logs"]
+
+
+def test_logs_are_null_for_a_task_that_has_not_run(client):
+    run_id = trigger(client, LINEAR)
+    logs = client.get(f"/runs/{run_id}/tasks/b/logs").json()
+    assert logs["logs"] is None
+
+
+def test_logs_for_unknown_task_is_404(client):
+    run_id = trigger(client, LINEAR)
+    assert client.get(f"/runs/{run_id}/tasks/nope/logs").status_code == 404
+
+
+def test_logs_survive_across_a_retry_as_the_latest_attempt(client, broker, worker, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "RETRY_BASE_DELAY", 0.0)
+    monkeypatch.setattr(config, "RETRY_MAX_DELAY", 0.0)
+    monkeypatch.setattr(config, "RETRY_JITTER", 0.0)
+
+    @executors.register("a")
+    def flaky(ctx):
+        print(f"attempt {ctx.attempt}")
+        if ctx.attempt < 1:
+            raise RuntimeError("not yet")
+
+    run_id = trigger(client, {"name": "n", "workflow": [
+        {"id": "a", "depends_on": [], "max_retries": 2},
+    ]})
+    broker.consume(worker.handle, wait=True)
+
+    logs = client.get(f"/runs/{run_id}/tasks/a/logs").json()["logs"]
+    assert "attempt 1" in logs
+    assert "attempt 0" not in logs
