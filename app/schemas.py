@@ -57,6 +57,7 @@ class TaskOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+    logs: str | None
 
 
 class RunOut(BaseModel):

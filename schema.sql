@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     error_message TEXT,
+    logs TEXT,                  -- captured stdout/stderr from the latest attempt
     CONSTRAINT ck_tasks_status
         CHECK (status IN ('pending','queued','running','success','failed','cancelled')),
     CONSTRAINT uq_tasks_run_task_name UNIQUE (run_id, task_name)

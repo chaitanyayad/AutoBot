@@ -149,6 +149,11 @@ class Task(Base):
         DateTime(timezone=True), nullable=True
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Captured stdout/stderr from the handler's most recent attempt (Phase 6
+    # dashboard). Overwritten on each retry — only the latest attempt's output
+    # is kept, since `error_message` already carries the history of why prior
+    # attempts failed.
+    logs: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     run: Mapped[WorkflowRun] = relationship(back_populates="tasks")
 
