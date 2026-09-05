@@ -10,3 +10,4 @@ apscheduler==3.10.4
 # dev / test
 pytest==8.3.4
 httpx==0.28.1
+websockets==13.1

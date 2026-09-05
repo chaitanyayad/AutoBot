@@ -1,15 +1,17 @@
-"""FastAPI application — Phase 1 surface.
+"""FastAPI application: registration, triggering, inspection, cron scheduling
+and the live dashboard.
 
-Registration, triggering and inspection. Task execution arrives in Phase 2; until
-then `/runs/{id}/tasks/{task_name}/simulate` stands in for a worker so the DAG
-resolution order can be stepped through by hand.
+`/runs/{id}/tasks/{task_name}/simulate` is a Phase-1 holdover — a dev-only
+stand-in for a worker, off by default now that real workers exist.
 """
 
+import asyncio
 import pathlib
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -48,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Workflow Orchestration Engine",
     version="0.1.0",
-    description="DAG-based workflow orchestration. Phase 1: core DAG engine.",
+    description="DAG-based workflow orchestration, scheduling and a live dashboard.",
     lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -261,3 +263,39 @@ def dashboard_page():
     `/workflows`, `/runs`, `/workflows/{id}/graph` and the `/ws/runs/{id}`
     socket below — so there is nothing server-rendered to keep in sync."""
     return FileResponse(STATIC_DIR / "dashboard.html")
+
+
+def _run_detail_or_none(run_id: uuid.UUID) -> RunDetail | None:
+    """Load one run's detail in its own session. Used by the WebSocket loop,
+    which lives outside the request-scoped `get_session` dependency."""
+    session = db.SessionLocal()
+    try:
+        run = session.get(WorkflowRun, run_id)
+        return None if run is None else _run_detail(session, run)
+    finally:
+        session.close()
+
+
+@app.websocket("/ws/runs/{run_id}")
+async def run_updates(websocket: WebSocket, run_id: uuid.UUID):
+    """Push run + task state until the run reaches a terminal status.
+
+    There is no cross-process pub/sub from the worker back to the API — a
+    worker in another container has no channel to announce a change on. This
+    polls the same database the worker writes to, on an async loop so one slow
+    dashboard connection cannot block another, and stops once the run can no
+    longer change.
+    """
+    await websocket.accept()
+    try:
+        while True:
+            detail = await run_in_threadpool(_run_detail_or_none, run_id)
+            if detail is None:
+                await websocket.send_json({"error": f"run {run_id} not found"})
+                break
+            await websocket.send_text(detail.model_dump_json())
+            if detail.status in TERMINAL_RUN_STATUSES:
+                break
+            await asyncio.sleep(config.DASHBOARD_POLL_INTERVAL)
+    except WebSocketDisconnect:
+        pass
