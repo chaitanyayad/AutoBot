@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workflow Orchestration Engine</title>
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+
+<div id="list-view">
+  <header class="app-header">
+    <div>
+      <h1>Workflow Orchestration Engine</h1>
+      <div class="subtitle">DAG-based orchestration &middot; live from <span class="mono">/workflows</span> and <span class="mono">/runs</span></div>
+    </div>
+    <button id="refresh-btn">Refresh</button>
+  </header>
+
+  <section class="card">
+    <h2>Workflows</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Schedule</th>
+          <th>Created</th>
+          <th>ID</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="workflows-body"></tbody>
+    </table>
+    <div id="workflows-empty" class="empty" hidden>No workflows registered yet — POST one to <span class="mono">/workflows</span>.</div>
+  </section>
+
+  <section class="card">
+    <h2>Runs</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Workflow</th>
+          <th>Triggered</th>
+          <th>Completed</th>
+          <th>Run ID</th>
+        </tr>
+      </thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+    <div id="runs-empty" class="empty" hidden>No runs yet — trigger a workflow above.</div>
+  </section>
+</div>
+
+<div id="detail-view" hidden>
+  <a class="back-link" href="/dashboard">&larr; all runs</a>
+
+  <section class="card" style="margin-top:14px;">
+    <div class="run-header">
+      <div>
+        <h2 style="margin-bottom:4px;">Run <span id="run-id-short" class="mono"></span></h2>
+        <div class="meta">
+          <span><span id="live-dot" class="live-dot"></span><span id="live-label">connecting&hellip;</span></span>
+          <span>workflow: <strong id="run-workflow-name">&mdash;</strong></span>
+          <span>triggered: <strong id="run-triggered">&mdash;</strong></span>
+          <span>completed: <strong id="run-completed">&mdash;</strong></span>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span id="run-status-badge"></span>
+        <button id="cancel-btn" class="danger">Cancel run</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>DAG</h2>
+    <div id="graph-wrap"><svg id="graph-svg"></svg></div>
+    <div class="legend">
+      <span class="item"><span class="swatch" style="background:var(--text-muted)"></span>pending</span>
+      <span class="item"><span class="swatch" style="background:var(--series-1)"></span>queued</span>
+      <span class="item"><span class="swatch" style="background:var(--series-1)"></span>running</span>
+      <span class="item"><span class="swatch" style="background:var(--status-good)"></span>success</span>
+      <span class="item"><span class="swatch" style="background:var(--status-critical)"></span>failed</span>
+      <span class="item"><span class="swatch" style="background:var(--status-warning)"></span>cancelled</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Tasks</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Task</th>
+          <th>Status</th>
+          <th>Retries</th>
+          <th>Worker</th>
+          <th>Started</th>
+          <th>Completed</th>
+          <th>Error</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tasks-body"></tbody>
+    </table>
+  </section>
+</div>
+
+<div id="logs-modal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <header>
+      <span id="logs-title">logs</span>
+      <button id="logs-close">close</button>
+    </header>
+    <pre id="logs-body">(no output captured)</pre>
+  </div>
+</div>
+
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
