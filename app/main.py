@@ -5,10 +5,13 @@ then `/runs/{id}/tasks/{task_name}/simulate` stands in for a worker so the DAG
 resolution order can be stepped through by hand.
 """
 
+import pathlib
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,6 +27,8 @@ from app.models import (
     WorkflowRun,
 )
 from app.schemas import RunDetail, RunOut, TaskOut, WorkflowCreate, WorkflowOut
+
+STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -46,6 +51,7 @@ app = FastAPI(
     description="DAG-based workflow orchestration. Phase 1: core DAG engine.",
     lifespan=lifespan,
 )
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 # --- helpers ----------------------------------------------------------------
@@ -244,3 +250,14 @@ def simulate_task_result(
     )
     session.commit()
     return _run_detail(session, run)
+
+
+# --- dashboard (Phase 6) -----------------------------------------------------
+
+
+@app.get("/dashboard")
+def dashboard_page():
+    """The single dashboard page. Everything past this is fetched client-side —
+    `/workflows`, `/runs`, `/workflows/{id}/graph` and the `/ws/runs/{id}`
+    socket below — so there is nothing server-rendered to keep in sync."""
+    return FileResponse(STATIC_DIR / "dashboard.html")
