@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import config, cron, db, scheduler
-from app.dag import DagValidationError, get_runnable_tasks
+from app.dag import DagValidationError, execution_levels, get_runnable_tasks, parse_definition
 from app.db import get_session, init_db
 from app.models import (
     TASK_QUEUED,
@@ -109,6 +109,23 @@ def get_workflow(workflow_id: uuid.UUID, session: Session = Depends(get_session)
     if workflow is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"workflow {workflow_id} not found")
     return workflow
+
+
+@app.get("/workflows/{workflow_id}/graph")
+def get_workflow_graph(workflow_id: uuid.UUID, session: Session = Depends(get_session)):
+    """The DAG's static shape — levels for layout, edges for drawing them.
+
+    Decoupled from any particular run: the dashboard fetches this once per
+    workflow and overlays live task status from `/runs/{run_id}` on top of it.
+    """
+    workflow = session.get(Workflow, workflow_id)
+    if workflow is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"workflow {workflow_id} not found")
+
+    specs = parse_definition(workflow.definition)
+    levels = execution_levels(specs)
+    edges = [[dep, spec.id] for spec in specs for dep in spec.depends_on]
+    return {"levels": levels, "edges": edges}
 
 
 @app.post(
