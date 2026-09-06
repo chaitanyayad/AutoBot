@@ -197,3 +197,55 @@ def test_logs_survive_across_a_retry_as_the_latest_attempt(client, broker, worke
     logs = client.get(f"/runs/{run_id}/tasks/a/logs").json()["logs"]
     assert "attempt 1" in logs
     assert "attempt 0" not in logs
+
+
+# --- graph endpoint --------------------------------------------------------------
+
+
+def test_graph_endpoint_returns_levels_and_edges(client):
+    workflow_id = client.post("/workflows", json=FAN_OUT).json()["id"]
+    graph = client.get(f"/workflows/{workflow_id}/graph").json()
+
+    assert graph["levels"][0] == ["root"]
+    assert set(graph["levels"][1]) == {"x", "y"}
+    assert graph["levels"][2] == ["end"]
+
+    edges = {tuple(e) for e in graph["edges"]}
+    assert edges == {("root", "x"), ("root", "y"), ("x", "end"), ("y", "end")}
+
+
+def test_graph_endpoint_404_for_unknown_workflow(client):
+    assert client.get(f"/workflows/{uuid.uuid4()}/graph").status_code == 404
+
+
+# --- dashboard page + static assets ----------------------------------------------
+
+
+def test_dashboard_page_is_served(client):
+    response = client.get("/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
+def test_dashboard_static_assets_are_served(client):
+    for path in ("/static/dashboard.css", "/static/dashboard.js"):
+        assert client.get(path).status_code == 200
+
+
+# --- live updates over WebSocket --------------------------------------------------
+
+
+def test_websocket_pushes_final_state_and_closes_for_a_finished_run(client, broker, worker):
+    run_id = trigger(client, LINEAR)
+    broker.consume(worker.handle)
+
+    with client.websocket_connect(f"/ws/runs/{run_id}") as ws:
+        detail = ws.receive_json()
+    assert detail["status"] == "completed"
+    assert {t["task_name"] for t in detail["tasks"]} == {"a", "b"}
+
+
+def test_websocket_reports_an_unknown_run(client):
+    with client.websocket_connect(f"/ws/runs/{uuid.uuid4()}") as ws:
+        message = ws.receive_json()
+    assert "error" in message
