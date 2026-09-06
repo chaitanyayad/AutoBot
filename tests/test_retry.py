@@ -307,6 +307,77 @@ def test_live_workers_tasks_are_left_alone(client, broker, session, session_fact
     assert client.get(f"/runs/{run_id}/tasks").json()[0]["status"] == "running"
 
 
+# --- recovery: a lost publish (Phase 7 gap closure) -------------------------
+
+
+def _backdate_dispatch(session_factory, task_id, age_seconds):
+    """Simulate a task whose `dispatched_at` is old — as if its publish, which
+    happens after commit and is not itself transactional, never landed."""
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        task.dispatched_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        s.commit()
+
+
+def test_stuck_queued_task_is_reclaimed_and_retried(client, broker, session_factory):
+    run_id = trigger(client, one_task(max_retries=2))
+    task_id = broker.messages()[0].task_id
+    _backdate_dispatch(session_factory, __import__("uuid").UUID(task_id), age_seconds=600)
+
+    with session_factory() as s:
+        reclaimed = recovery.reclaim_stuck_queued_tasks(s, timeout=300)
+        s.commit()
+
+    assert [t.task_name for t in reclaimed] == ["a"]
+    task = client.get(f"/runs/{run_id}/tasks").json()[0]
+    assert task["status"] == "queued", "back on the queue for another attempt"
+    assert task["retry_count"] == 1
+    assert "stuck queued" in task["error_message"]
+
+
+def test_recently_queued_task_is_left_alone(client, session_factory):
+    trigger(client, one_task(max_retries=2))  # dispatched_at is "now"
+
+    with session_factory() as s:
+        assert recovery.reclaim_stuck_queued_tasks(s, timeout=300) == []
+
+
+def test_stuck_queued_task_exhausts_its_retry_budget(client, broker, session_factory):
+    run_id = trigger(client, one_task(max_retries=0))
+    task_id = broker.messages()[0].task_id
+    _backdate_dispatch(session_factory, __import__("uuid").UUID(task_id), age_seconds=600)
+
+    with session_factory() as s:
+        recovery.reclaim_stuck_queued_tasks(s, timeout=300)
+        s.commit()
+
+    run = client.get(f"/runs/{run_id}").json()
+    assert run["status"] == "failed"
+    assert run["tasks"][0]["status"] == "failed"
+    assert len(broker.dead_letters()) == 1
+
+
+def test_a_freshly_delayed_retry_is_not_mistaken_for_stuck(
+    client, broker, worker, monkeypatch, session_factory
+):
+    """A retry's `dispatched_at` is set to when its backoff delay elapses, not
+    to "now" — otherwise every delayed retry would look stuck the moment the
+    sweep's timeout is shorter than the backoff itself."""
+    monkeypatch.setattr(config, "RETRY_BASE_DELAY", 30.0)
+    monkeypatch.setattr(config, "RETRY_MAX_DELAY", 30.0)
+
+    @executors.register("a")
+    def flaky(ctx):
+        raise RuntimeError("nope")
+
+    trigger(client, one_task(max_retries=2))
+    broker.consume(worker.handle)  # first attempt fails, requeues with a 30s delay
+
+    with session_factory() as s:
+        # A sweep timeout shorter than the retry delay must not touch it.
+        assert recovery.reclaim_stuck_queued_tasks(s, timeout=1) == []
+
+
 # --- real RabbitMQ delay path -----------------------------------------------
 
 
