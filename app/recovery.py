@@ -1,10 +1,16 @@
-"""Worker liveness and recovery of tasks orphaned by a dead worker.
+"""Worker liveness and recovery of tasks orphaned by a dead worker or a lost message.
 
 A worker that dies mid-task leaves the row `running` forever: the message was
 acked, so RabbitMQ will not redeliver it, and no other worker will touch it
 because it is no longer `queued`. The heartbeat table is what makes that
 detectable — a worker silent past `HEARTBEAT_TIMEOUT` is presumed dead and its
 in-flight tasks are re-queued (or failed, if they are out of retries).
+
+The other way a task can get stuck is never having had a message at all: the
+row commits `queued`, then the broker publish that was meant to follow it
+fails (see `_publish_on_commit` in scheduler.py). No worker will ever see that
+task, and no heartbeat is involved — `reclaim_stuck_queued_tasks` covers it
+with the same retry path, keyed on `dispatched_at` instead of a worker's pulse.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import config, scheduler
-from app.models import TASK_RUNNING, Task, Worker as WorkerRow
+from app.models import TASK_QUEUED, TASK_RUNNING, Task, Worker as WorkerRow
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +134,50 @@ def reclaim_orphaned_tasks(session: Session, timeout: float | None = None) -> li
     return reclaimed
 
 
+def reclaim_stuck_queued_tasks(session: Session, timeout: float | None = None) -> list[Task]:
+    """Re-queue tasks whose message never arrived. Returns those reclaimed.
+
+    A task is stuck when it has been `queued` well past the point it became
+    claimable (`dispatched_at`) with nothing to show for it — the symptom of a
+    publish that failed after its transaction committed. There is no worker
+    identity to check here, unlike an orphaned `running` task; the row itself
+    aging past `QUEUED_TIMEOUT` is the only signal available.
+
+    Routed through the ordinary retry path, exactly like an orphan: a task
+    whose messages keep going missing still exhausts its retry budget and
+    lands in the dead letter queue instead of being reclaimed forever.
+    """
+    timeout = config.QUEUED_TIMEOUT if timeout is None else timeout
+    cutoff = _utcnow() - timedelta(seconds=timeout)
+
+    stuck = select(Task).where(
+        Task.status == TASK_QUEUED,
+        Task.dispatched_at.is_not(None),
+        Task.dispatched_at < cutoff,
+    )
+    # Same reasoning as the orphan sweep: every worker runs this, so SKIP
+    # LOCKED keeps two sweepers from both retrying the same stuck task.
+    if session.get_bind().dialect.name == "postgresql":
+        stuck = stuck.with_for_update(skip_locked=True)
+
+    reclaimed: list[Task] = []
+    for task in session.scalars(stuck).all():
+        logger.warning(
+            "reclaiming %s: queued since %s with no claim", task.task_name, task.dispatched_at
+        )
+        scheduler.report_result(
+            session,
+            task,
+            succeed=False,
+            error=f"stuck queued for over {timeout:.0f}s — its message was likely lost",
+        )
+        reclaimed.append(task)
+
+    if reclaimed:
+        session.flush()
+    return reclaimed
+
+
 # --- background thread ------------------------------------------------------
 
 
@@ -152,6 +202,7 @@ class HeartbeatThread(threading.Thread):
                     now = time.monotonic()
                     if self.sweep and now - self._last_sweep >= config.RECOVERY_INTERVAL:
                         reclaim_orphaned_tasks(session)
+                        reclaim_stuck_queued_tasks(session)
                         self._last_sweep = now
                     session.commit()
             except Exception:

@@ -65,6 +65,12 @@ HEARTBEAT_INTERVAL = float(os.getenv("HEARTBEAT_INTERVAL", "5.0"))
 HEARTBEAT_TIMEOUT = float(os.getenv("HEARTBEAT_TIMEOUT", "30.0"))
 # How often each worker sweeps for tasks orphaned by a dead worker.
 RECOVERY_INTERVAL = float(os.getenv("RECOVERY_INTERVAL", "15.0"))
+# A task still `queued` this long after becoming claimable is presumed to have
+# lost its message (the one gap a healthy worker fleet cannot self-heal: a
+# publish that fails *after* its authorising transaction commits — see
+# `_publish_on_commit` in scheduler.py). Deliberately generous, since a busy
+# fleet can leave healthy work queued for a while with nothing wrong at all.
+QUEUED_TIMEOUT = float(os.getenv("QUEUED_TIMEOUT", "300.0"))
 
 # --- development --------------------------------------------------------------
 
