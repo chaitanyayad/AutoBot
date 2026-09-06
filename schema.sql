@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     worker_id TEXT,
+    dispatched_at TIMESTAMPTZ,  -- when this attempt becomes claimable (now, or now+backoff)
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     error_message TEXT,

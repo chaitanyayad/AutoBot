@@ -142,6 +142,15 @@ class Task(Base):
         Integer, nullable=False, default=3, server_default=text("3")
     )
     worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The moment this attempt becomes claimable: set to "now" on a fresh
+    # dispatch, or to "now + backoff delay" on a retry, since the message for a
+    # delayed retry is not actually on the main queue until then. Recovery uses
+    # it to catch a task stuck `queued` well past that point — the symptom of a
+    # publish that failed *after* its transaction committed (Phase 5/6 known
+    # gap, closed in Phase 7; see `recovery.reclaim_stuck_queued_tasks`).
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -16,7 +16,7 @@ workers at once, which costs three rules:
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
@@ -193,6 +193,7 @@ def dispatch(session: Session, tasks: list[Task]) -> None:
     """
     for task in tasks:
         task.status = TASK_QUEUED
+        task.dispatched_at = _utcnow()
     session.flush()
 
     for task in tasks:
@@ -279,6 +280,11 @@ def _requeue_for_retry(session: Session, task: Task) -> WorkflowRun:
     session.flush()
 
     delay = backoff_delay(task.retry_count)
+    # Claimable only once the delay elapses — the message isn't on the main
+    # queue until its retry-tier TTL expires it there. Recovery's stuck-queued
+    # sweep measures from this point, not from "now", or it would reclaim a
+    # perfectly healthy delayed retry before its delay is even up.
+    task.dispatched_at = _utcnow() + timedelta(seconds=delay)
     _publish_on_commit(
         session,
         TaskMessage(
