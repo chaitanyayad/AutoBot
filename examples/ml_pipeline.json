@@ -1,0 +1,13 @@
+{
+  "name": "ml_pipeline",
+  "workflow": [
+    { "id": "ingest_data",       "depends_on": [] },
+    { "id": "validate_data",     "depends_on": ["ingest_data"] },
+    { "id": "engineer_features", "depends_on": ["validate_data"] },
+    { "id": "train_model",       "depends_on": ["engineer_features"] },
+    { "id": "evaluate_model",    "depends_on": ["train_model"] },
+
+    { "id": "deploy_model",      "depends_on": ["evaluate_model"] },
+    { "id": "publish_report",    "depends_on": ["evaluate_model"] }
+  ]
+}

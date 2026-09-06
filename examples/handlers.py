@@ -39,3 +39,41 @@ def slow_task(ctx: TaskContext) -> None:
 
     logger.info("slow_task starting on %s", ctx.worker_id)
     time.sleep(60)
+
+
+# --- examples/ml_pipeline.json -----------------------------------------------
+
+
+@register("ingest_data")
+def ingest_data(ctx: TaskContext) -> None:
+    logger.info("ingesting training data (attempt %s)", ctx.attempt)
+
+
+@register("validate_data")
+def validate_data(ctx: TaskContext) -> None:
+    logger.info("validating schema and null rates")
+
+
+@register("engineer_features")
+def engineer_features(ctx: TaskContext) -> None:
+    logger.info("building feature matrix")
+
+
+@register("train_model")
+def train_model(ctx: TaskContext) -> None:
+    logger.info("training model (attempt %s)", ctx.attempt)
+
+
+@register("evaluate_model")
+def evaluate_model(ctx: TaskContext) -> None:
+    logger.info("scoring model against the holdout set")
+
+
+@register("deploy_model")
+def deploy_model(ctx: TaskContext) -> None:
+    logger.info("promoting model to serving")
+
+
+@register("publish_report")
+def publish_report(ctx: TaskContext) -> None:
+    logger.info("publishing evaluation report")
