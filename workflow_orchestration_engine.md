@@ -269,21 +269,81 @@ while True:
   its mechanism removed. Verified live: 33-node DAG over 5 containerised workers,
   every task executed exactly once, 8s of task time in 4.3s wall clock on the 6-shard demo
 
-### Phase 5 — Scheduling
-- [ ] Cron-style triggers: `"schedule": "0 9 * * *"`
-- [ ] APScheduler integration in FastAPI
-- [ ] Persist scheduled workflows, auto-trigger on schedule
+### Phase 5 — Scheduling ✅
+- [x] Cron-style triggers: `"schedule": "0 9 * * *"` — validated at registration
+  with APScheduler's own parser, same principle as DAG validation (`app/cron.py`,
+  `app/schemas.py`)
+- [x] APScheduler integration in FastAPI — one process-wide `BackgroundScheduler`,
+  started and stopped from the app's `lifespan` (`app/main.py`)
+- [x] Persist scheduled workflows, auto-trigger on schedule — `workflows.schedule`
+  column; every non-null schedule is re-armed from the database on startup, and a
+  newly-registered one is armed immediately, so schedules survive a restart
+  without their own migration step. The job itself calls the same
+  `create_run` + `resolve` pair a manual trigger does.
+- 12 new tests in `tests/test_scheduling.py`; verified live against the running
+  API — a bad cron expression 422s, a valid one arms an APScheduler job, and a
+  workflow inserted directly into the database (no registration call) is armed
+  by a fresh `cron.start()`, proving the restart path independently of the
+  registration path.
 
-### Phase 6 — Dashboard
-- [ ] Workflow list: all runs + status
-- [ ] Run detail: DAG visualization + task states
-- [ ] Live updates via WebSocket or polling
-- [ ] Logs per task (stdout/stderr from worker)
+### Phase 6 — Dashboard ✅
+- [x] Workflow list: all runs + status — `GET /dashboard` (`app/static/`)
+- [x] Run detail: DAG visualization + task states — inline SVG node-link diagram
+  laid out from `GET /workflows/{id}/graph` (levels + edges), overlaid with live
+  per-task status
+- [x] Live updates via WebSocket or polling — `WS /ws/runs/{run_id}` polls the
+  database server-side and pushes on a fixed interval until the run reaches a
+  terminal status, then closes; the page falls back to polling `GET /runs/{id}`
+  if the socket cannot be opened
+- [x] Logs per task (stdout/stderr from worker) — the worker captures a
+  handler's stdout/stderr per attempt (`app/worker.py`) into `tasks.logs`,
+  served by `GET /runs/{id}/tasks/{name}/logs`
+- [x] `POST /runs/{run_id}/cancel` (promised for this phase in the README) —
+  stops further dispatch on a run; tasks already in flight still report back,
+  since nothing here can reach into a worker process mid-execution
+  (`scheduler.cancel_run`)
+- 19 new tests in `tests/test_dashboard.py`, including a real WebSocket round
+  trip via `TestClient.websocket_connect` and a cancel-mid-fan-out test that
+  fails if the cancellation check is removed from `resolve()`. Verified live:
+  registered, triggered and cancelled runs through the browser-facing API with
+  a real worker on real Postgres + RabbitMQ.
 
-### Phase 7 — Polish
-- [ ] Docker Compose: postgres + rabbitmq + api + 3 workers + frontend
-- [ ] README with architecture diagram
-- [ ] Example workflows: resume pipeline, ML pipeline, notification pipeline
+### Phase 7 — Polish ✅
+- [x] Docker Compose: postgres + rabbitmq + api + 3 workers + frontend — the
+  dashboard needed nothing extra: it's static files under `app/static/`,
+  already copied into the one image `api` and `worker` both run from
+  (`Dockerfile`), served by the same FastAPI process at `GET /dashboard`
+- [x] README with architecture diagram — see README's Architecture section
+- [x] Example workflows: resume pipeline (existing), ML pipeline, notification
+  pipeline — `examples/ml_pipeline.json`, `examples/notification_pipeline.json`,
+  with matching handlers added to `examples/handlers.py` (`notification_pipeline`'s
+  `send_sms` fails its first attempt on purpose, with `max_retries: 5` on that
+  node, so the retry path is visible in a live run of a non-toy example)
+- Also closed the two gaps carried forward from Phases 5–6, since "complete
+  the project" reasonably includes not shipping with known holes:
+  - **Lost dispatch messages are now recovered.** `dispatch()` and the retry
+    path both stamp `tasks.dispatched_at` (the moment an attempt becomes
+    claimable — "now" for a fresh dispatch, "now + backoff delay" for a
+    retry, so a delayed retry is never mistaken for stuck). The existing
+    heartbeat sweep now also calls `recovery.reclaim_stuck_queued_tasks`,
+    which re-queues (or fails, if the retry budget is spent) anything still
+    `queued` past `QUEUED_TIMEOUT` — the same `FOR UPDATE SKIP LOCKED` +
+    retry-path pattern as the orphaned-`running` sweep, just keyed on
+    `dispatched_at` instead of a worker's heartbeat.
+  - **Cancellation is a real task status.** Added `TASK_CANCELLED` (schema +
+    model CHECK constraint). `cancel_run` now bulk-updates every `pending`/
+    `queued` task in the run to `cancelled` in the same statement that
+    cancels the run — a `queued` task's stray message is then declined by
+    `claim()`'s compare-and-set (`status = 'queued'` no longer matches), so
+    it never executes even though the message still exists. A task already
+    `running` is untouched, since nothing here can reach into a worker
+    process mid-execution.
+- 12 new/rewritten tests across `tests/test_retry.py` (lost-message recovery)
+  and `tests/test_dashboard.py` (task-level cancellation, including that a
+  cancelled task's stray queue message is declined rather than executed).
+  Full suite: **125 tests, all passing against real Postgres + RabbitMQ**
+  (111 run serviceless on SQLite alone; 10 need Postgres's real row locking,
+  4 need a reachable RabbitMQ).
 
 ---
 
