@@ -1,0 +1,14 @@
+{
+  "name": "notification_pipeline",
+  "workflow": [
+    { "id": "fetch_recipients", "depends_on": [] },
+
+    { "id": "render_email", "depends_on": ["fetch_recipients"] },
+    { "id": "render_sms",   "depends_on": ["fetch_recipients"] },
+
+    { "id": "send_email", "depends_on": ["render_email"] },
+    { "id": "send_sms",   "depends_on": ["render_sms"], "max_retries": 5 },
+
+    { "id": "log_delivery", "depends_on": ["send_email", "send_sms"] }
+  ]
+}
