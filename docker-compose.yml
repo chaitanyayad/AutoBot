@@ -28,6 +28,9 @@ services:
       timeout: 5s
       retries: 10
 
+  # Also the frontend: the dashboard (app/static/) is plain HTML/CSS/JS with no
+  # build step, so it needs nothing beyond what's already copied into this
+  # image — served at http://localhost:${API_PORT:-8000}/dashboard.
   api:
     build: .
     ports:
@@ -43,6 +46,11 @@ services:
       WORKER_PREFETCH: "1"
       DEFAULT_MAX_RETRIES: "3"
       WORKER_HANDLERS: examples.handlers
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     depends_on:
       postgres:
         condition: service_healthy
